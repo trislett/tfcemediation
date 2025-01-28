@@ -1,0 +1,24 @@
+name: tfce_mediation_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python
+  - setuptools
+  - numpy
+  - libxcrypt
+  - pip
+  - r-base
+  - r-essentials
+  - r-rgcca
+  - cython
+  - rpy2
+  - tqdm
+  - matplotlib
+  - scipy
+  - nibabel
+  - cython
+  - scikit-learn
+  - scikit-image
+  - joblib
+  - pandas

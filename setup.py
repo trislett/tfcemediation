@@ -21,8 +21,8 @@ CLASSIFIERS = ["Development Status :: 4 - Beta",
 extensions = [
     # First extension: adjacency
     Extension(
-        "src.adjacency",  # Name of the resulting module
-        ["src/adjacency.pyx"],  # Source file
+        "tfcemediation.adjacency",  # Name of the resulting module
+        ["tfcemediation/adjacency.pyx"],  # Source file
         language="c++",  # Use C++ for compilation
         include_dirs=[
             numpy.get_include(),  # NumPy headers
@@ -34,8 +34,8 @@ extensions = [
     ),
     # Second extension: tfce
     Extension(
-        "src.tfce",  # Name of the resulting module
-        ["src/tfce.pyx"],  # Source file
+        "tfcemediation.tfce",  # Name of the resulting module
+        ["tfcemediation/tfce.pyx"],  # Source file
         language="c++",  # Use C++ for compilation
         include_dirs=[
             numpy.get_include(),  # NumPy headers
@@ -46,14 +46,14 @@ extensions = [
         library_dirs=[],  # Specify library directories if needed
     ),
     Extension(
-        "src.cynumstats",  # Module name
-        sources=["src/cynumstats.pyx"],  # Cython source
+        "tfcemediation.cynumstats",  # Module name
+        sources=["tfcemediation/cynumstats.pyx"],  # Cython source
         include_dirs=[numpy.get_include()],  # Include NumPy headers
         language="c"
     )
 ]
 
-exec(open('src/version.py').read())
+exec(open('tfcemediation/version.py').read())
 setup(name = PACKAGE_NAME, version = __version__,
   maintainer = "Tristram Lett",
   maintainer_email = "tristram.lett@charite.de",
