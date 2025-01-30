@@ -2,168 +2,252 @@
 
 import os
 import sys
+import warnings
+import pickle
+import gzip
+import shutil
+
 import nibabel as nib
 import numpy as np
+import pandas as pd
+
 from tqdm import tqdm
+from joblib import Parallel, delayed, wrap_non_picklable_objects, dump, load
+from statsmodels.stats.multitest import fdrcorrection
+from scipy.stats import t as tdist
+from scipy.stats import f as fdist
 from tfcemediation.tfce import CreateAdjSet
 from tfcemediation.cynumstats import cy_lin_lstsqr_mat, tval_fast, fast_se_of_slope, cy_lin_lstsqr_mat_residual
-from joblib import Parallel, delayed, wrap_non_picklable_objects, dump, load
-
-
-def create_adjac_voxel(data_mask, dirtype=26): # default is 26 directions
-	data_mask = data_mask.astype(np.float32)
-	ind = np.where(data_mask == 1)
-	dm = np.zeros_like(data_mask)
-	x_dim, y_dim, z_dim = data_mask.shape
-	adjacency = [set([]) for i in range(int(data_mask.sum()))]
-	label = 0
-	for x,y,z in zip(ind[0],ind[1],ind[2]):
-		dm[x,y,z] = label
-		label += 1
-	for x,y,z in zip(ind[0],ind[1],ind[2]):
-		xMin=max(x-1, 0)
-		xMax=min(x+1, x_dim-1)
-		yMin=max(y-1, 0)
-		yMax=min(y+1, y_dim-1)
-		zMin=max(z-1, 0)
-		zMax=min(z+1, z_dim-1)
-		local_area = dm[xMin:xMax+1,yMin:yMax+1,zMin:zMax+1]
-		if int(dirtype)==6:
-			if local_area.shape!=(3,3,3): # check to prevent calculating adjacency at walls
-				local_area = dm[x,y,z]
-			else:
-				local_area = local_area * np.array([0,0,0,0,1,0,0,0,0,0,1,0,1,1,1,0,1,0,0,0,0,0,1,0,0,0,0]).reshape(3,3,3)
-		cV = int(dm[x,y,z])
-		for j in local_area[local_area>0]:
-			adjacency[cV].add(int(j))
-	adjacency = np.array([[x for x in sorted(i) if x != index] for index, i in enumerate(adjacency)], dtype=object)
-	adjacency[0] = []
-	return(adjacency)
-
-def voxel_adjacency(binary_mask, connectivity_directions = 26):
-	assert connectivity_directions==8 or connectivity_directions==26, "adjacency_directions must equal {8, 26}"
-	assert binary_mask.ndim==3, "binary_mask must have ndim==3"
-	assert binary_mask.max()==1, "binary_mask max value must be 1"
-	return(create_adjac_voxel(binary_mask, dirtype=connectivity_directions))
-
-def calculate_tfce(statistic_flat, adjacency_set, H = 2., E = 0.67):
-	calcTFCE = CreateAdjSet(H, E, adjacency_set) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
-	stat = statistic_flat.astype(np.float32, order = "C")
-	stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-	calcTFCE.run(stat, stat_TFCE)
-	return(stat_TFCE)
-
-def paralle_tfce(i, statistic_flat, adjacency_set, H = 2., E = 1., seed = None):
-	if seed is None:
-		np.random.seed(np.random.randint(4294967295))
-	else:
-		np.random.seed(seed)
-	statistic_img_TFCE = calculate_tfce(statistic_flat, adjacency_set, H = H, E = E)
-	return(np.max(statistic_img_TFCE))
 
 def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	return([np.random.randint(0, maxint) for i in range(n_seeds)])
 
+def dummy_code(variable, iscontinous = False, demean = True):
+	"""
+	Dummy codes a variable
+	
+	Parameters
+	----------
+	variable : array
+		1D array variable of any type 
+	Returns
+	---------
+	dummy_vars : array
+		dummy coded array of shape [(# subjects), (unique variables - 1)]
+	
+	"""
+	if iscontinous:
+		dummy_vars = variable - np.mean(variable,0)
+	else:
+		unique_vars = np.unique(variable)
+		dummy_vars = []
+		for var in unique_vars:
+			temp_var = np.zeros((len(variable)))
+			temp_var[variable == var] = 1
+			dummy_vars.append(temp_var)
+		dummy_vars = np.array(dummy_vars)[1:] # remove the first column as reference variable
+		dummy_vars = np.squeeze(dummy_vars).astype(int).T
+		if demean:
+			dummy_vars = dummy_vars - np.mean(dummy_vars,0)
+	return(dummy_vars)
 
-seeds = generate_seeds(1000)
+def stack_ones(arr):
+	"""
+	Add a column of ones to an array
+	
+	Parameters
+	----------
+	arr : array
 
-
-
-seed = None
-
-tfce_values = np.array(Parallel(n_jobs = 16, backend='multiprocessing')(
-										delayed(paralle_tfce)(i, statistic_flat = np.random.uniform(0.1, 1, 94223), # tfce needs to be included with the permutation
-												adjacency_set = adjacency_set,
-												H = 2., E = 0.67,
-												seed = seeds[i]) for i in tqdm(range(200))))
+	Returns
+	---------
+	arr : array
+		array with a column of ones
+	
+	"""
+	return(np.column_stack([np.ones(len(arr)),arr]))
 
 class VoxelImage:
 	"""
-	Input of voxel images, their mask, and calculation of adjacency
-		"""
-		def __init__(self, *, binary_mask_path, images_path):
+	VoxelImage is data class of efficiently loading voxel images, masking them by non-zero data, and calculatign their adjacency for statistical analyses. 
+	It is possible to save and load the data classes as *.pkl objects. The masking and conversion to np.float32 substantially reduces the
+	file size and RAM requirements in large datasets.
+	e.g., TBSS_Skeleton.nii.gz with 1000 subjects ~ 800mb. TBSS_Skeleton.nii ~ 50gb. TBSS_Skeleton.pkl ~ 400mb.
+		- This means that only 400mb is loaded into RAM instead of 50gb of RAM from loading the *.nii.gz directly.
+	"""
+	def __init__(self, *, binary_mask_path, image_path, gz_file_max = 400, tmp_dir = None):
 		"""
 		Initializes the VoxelImage class by loading the binary mask and voxel images.
 		
-		Args:
-			binary_mask_path (str): Path to the binary mask file (must contain only 0s and 1s).
-			images_path (str or list): Path(s) to the image file(s).
-		
-		Raises:
+		Parameters
+		----------
+		binary_mask_path : str
+			Path to the binary mask file (must contain only 0s and 1s).
+		image_path : str or list
+			Path(s) to the image file(s).
+		gz_file_max : float, default=400
+			Sets an limit of *.gz file size in mb. A file above that limit will be 
+			extracted to a temporary *.nii file prior to loading to save RAM. 
+		tmp_dir : float, default=None
+			Set the tempory directory. If None, the temporary *.nii will be created in 
+			current directory.
+		Raises
+		----------
 			AssertionError: If the mask is not binary.
 			AssertionError: If image dimensions or affine transformations do not match the mask.
-			TypeError: If `images_path` is neither a string nor a list.
+			TypeError: If 'image_path' is neither a string nor a list.
 		"""
 		# Load the mask
 		mask = nib.load(binary_mask_path)
 		mask_data = mask.get_fdata()
 		assert np.all(np.unique(mask_data)==np.array([0,1])), "binary_mask_path must be a binary image containing only {1,0}."
-		self.affine_ = mask.affine
 		self.mask_data_ = mask_data
+		self.affine_ = mask.affine
+		self.header_ = mask.header.copy()
+		self.sform_ = mask.header.get_sform(coded=True)
+		self.qform_ = mask.header.get_qform(coded=True)
 		self.n_voxels_ = int(mask_data.sum())
 		
 		# Load the images
-		self.images_path_ = images_path
-		if isinstance(images_path, str):
-			img = nib.load(images_path)
-			img_data = img.get_fdata()
-			assert img_data.ndim == 4, "image must be ndim==4 if images_path is a str"
-			assert np.all(self.affine_ == img_data.affine), "The affines of the mask and images must be equal"
+		self.image_path_ = image_path
+		if isinstance(image_path, str):
+			# be aware of zip size
+			image_size_mb = np.divide(os.path.getsize(image_path), (1024*1024))
+			if image_size_mb > gz_file_max:
+				if image_path.endswith(".gz"):
+					print("Extracting ['%s'] to save RAM" % image_path)
+					if tmp_dir is None:
+						outfile = '.tempfile.nii'
+					else:
+						outfile = os.path.join(tmp_dir, '.tempfile.nii')
+					with gzip.open(image_path, 'rb') as file_in:
+						with open(outfile, 'wb') as file_out:
+							shutil.copyfileobj(file_in, file_out)
+					img = nib.load(outfile)
+					img_data = img.get_fdata()
+					os.remove(outfile)
+				else:
+					warnings.warn("Cannot extract file [%s] with size %1.2fmb. Trying to load directly." % (image_path, image_size_mb), UserWarning)
+					img = nib.load(image_path)
+					img_data = img.get_fdata()
+			else:
+				img = nib.load(image_path)
+				img_data = img.get_fdata()
+			assert img_data.ndim == 4, "image must be ndim==4 if image_path is a str"
+			assert np.all(self.affine_ == img.affine), "The affines of the mask and images must be equal"
 			self.image_data_ = img_data[self.mask_data_==1].astype(np.float32, order = "C")
 			self.n_images_ = self.image_data_.shape[1]
-		elif isinstance(images_path, list):
-			self.n_images_ = len(images_path)
-			self.image_data_ = np.zeros((self.n_voxels_, self.n_images_), ).astype(np.float32, order = "C")
-			for s, path in enumerate(images_path):
-				img_temp = nib.load(images_path)
+		elif isinstance(image_path, list):
+			self.n_images_ = len(image_path)
+			self.image_data_ = np.zeros((self.n_voxels_, self.n_images_)).astype(np.float32, order = "C")
+			for s, path in enumerate(image_path):
+				img_temp = nib.load(image_path)
 				assert np.all(self.affine_ == img_temp.affine), "The affines of the mask and image [%s] must be equal" % os.path.basename(path)
 				self.image_data_[:,s] = img_temp.get_fdata()[self.mask_data_==1]
 		else:
-			raise TypeError("images_path has to be a string or list of strings")
-	def generate_adjacency(self, connectivity_directions = 26):
+			raise TypeError("image_path has to be a string or a list of strings")
+
+	def _create_adjac_voxel(self, data_mask, connectivity_directions=26): # default is 26 directions
 		"""
 		Generates the adjacency set for the voxel image based on connectivity.
 		
-		Args:
-			connectivity_directions (int, optional): Number of connectivity directions (default is 26).
+		Parameters
+		----------
+			data_mask : np.array
+				A binary mask of non-zero data.
+			connectivity_directions : int, default=26
+				Number of connectivity directions {8 or 26}.
+				Use 26 is all direction including diagonals (e.g., analysis of tbss skeleton data).
+				Use 8 for only the immediatiately adjacent voxel (e.g., analysis of second level fMRI data).
+		"""
+		data_mask = data_mask.astype(np.float32)
+		ind = np.where(data_mask == 1)
+		dm = np.zeros_like(data_mask)
+		x_dim, y_dim, z_dim = data_mask.shape
+		adjacency = [set([]) for i in range(int(data_mask.sum()))]
+		label = 0
+		for x,y,z in zip(ind[0],ind[1],ind[2]):
+			dm[x,y,z] = label
+			label += 1
+		for x,y,z in zip(ind[0],ind[1],ind[2]):
+			xMin=max(x-1, 0)
+			xMax=min(x+1, x_dim-1)
+			yMin=max(y-1, 0)
+			yMax=min(y+1, y_dim-1)
+			zMin=max(z-1, 0)
+			zMax=min(z+1, z_dim-1)
+			local_area = dm[xMin:xMax+1,yMin:yMax+1,zMin:zMax+1]
+			if int(connectivity_directions)==6:
+				if local_area.shape!=(3,3,3): # check to prevent calculating adjacency at walls
+					local_area = dm[x,y,z]
+				else:
+					local_area = local_area * np.array([0,0,0,0,1,0,0,0,0,0,1,0,1,1,1,0,1,0,0,0,0,0,1,0,0,0,0]).reshape(3,3,3)
+			cV = int(dm[x,y,z])
+			for j in local_area[local_area>0]:
+				adjacency[cV].add(int(j))
+		adjacency = np.array([[x for x in sorted(i) if x != index] for index, i in enumerate(adjacency)], dtype=object)
+		adjacency[0] = []
+		return(adjacency)
+
+	def generate_adjacency(self, connectivity_directions = 26):
+		"""
+		Helper function for creating the adjacency set based on connectivity.
+		
+		Parameters
+		----------
+			connectivity_directions : int, default=26
+				Number of connectivity directions {8 or 26}.
+				Use 26 is all direction including diagonals (e.g., analysis of tbss skeleton data).
+				Use 8 for only the immediatiately adjacent voxel (e.g., analysis of second level fMRI data).
+		Raises
+		----------
+			AssertionError: connectivity_directions is not 8 or 26.
 		"""
 		assert connectivity_directions==8 or connectivity_directions==26, "adjacency_directions must equal {8, 26}"
-		self.adjacency_ = create_adjac_voxel(binary_mask, dirtype=connectivity_directions)
+		self.adjacency_ = self._create_adjac_voxel(self.mask_data_, connectivity_directions=connectivity_directions)
 
 	def save(self, filename):
-	"""
-	Saves a VoxelImage instance as a pickle file.
-	
-	Args:
-		filename (str): The name of the pickle file to be saved.
-	Raises:
-		AssertionError: If the filename does not end with .pkl.
-	"""
+		"""
+		Saves a VoxelImage instance as a pickle file.
+		
+		Parameters
+		----------
+			filename : str
+				The name of the pickle file to be saved.
+				
+		Raises
+		----------
+			AssertionError: If the filename does not end with .pkl.
+		"""
 		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
 		with open(filename, 'wb') as f:
 			pickle.dump(self, f)
+
 	@classmethod
 	def load(cls, filename):
-	"""
-	Loads a VoxelImage instance from a pickle file.
-	
-	Args:
-		filename (str): The name of the pickle file to load.
-	Returns:
-		VoxelImage: The loaded instance.
-	Raises:
-		AssertionError: If the filename does not end with .pkl.
-	"""
+		"""
+		Loads a VoxelImage instance from a pickle file.
+		
+		Parameters
+		----------
+			filename (str): The name of the pickle file to load.
+		Returns
+		-------
+			VoxelImage : object
+				The loaded instance.
+		Raises
+		-------
+			AssertionError: If the filename does not end with .pkl.
+		"""
 		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
 		with open(filename, 'rb') as f:
 			return pickle.load(f)
-
 
 class LinearRegressionModelMRI:
 	"""
 	Linear Regression Model
 	"""
-	def __init__(self, *, fit_intercept = True, n_jobs = None, memory_mapping = False, use_tmp = True, fdr_correction = False, adjacency_set = None, image_mask = None):
+	def __init__(self, *, fit_intercept = True, n_jobs = 16, memory_mapping = False, use_tmp = True, fdr_correction = False, adjacency_set = None, image_mask = None):
 		"""
 		Initialize the LinearRegressionModel instance.
 
@@ -199,7 +283,7 @@ class LinearRegressionModelMRI:
 		----------
 		X : np.ndarray
 			Exogneous variables
-		
+			
 		y : np.ndarray
 			Endogenous variables
 		
@@ -207,7 +291,7 @@ class LinearRegressionModelMRI:
 		-------
 		X : ndarray
 			Reshaped if necessary.
-		
+			
 		y : ndarray
 			Reshaped if necessary.
 		"""
@@ -248,7 +332,26 @@ class LinearRegressionModelMRI:
 			self.memmap_y_name_ = None
 		else:
 			print("Error: No memory mapped files to remove.")
+
+	def _calculate_permuted_pvalue(self, permuted_distribution_arr, statistic_arr):
+		"""
+		Calculates p-values of an array from a permuted distribution
 		
+		Parameters
+		----------
+		permuted_distribution_arr : np.ndarray, shape(n_permutations)
+			permuted statistic array
+		
+		statistic_arr : np.ndarray or str, shape(n_features)
+			statistic array
+		
+		Returns
+		---------
+		arr : np.ndarray
+			p-values of statistic array
+		"""
+		return(np.mean(permuted_distribution_arr[:, None] >= statistic_arr, axis=0))
+
 	def fit(self, X, y):
 		"""
 		Fit the linear regression model to the data.
@@ -256,7 +359,7 @@ class LinearRegressionModelMRI:
 		Parameters
 		----------
 		X : np.ndarray, shape(n_samples, n_features)
-			Exogneous varialbes
+			Exogneous variables
 		
 		y : np.ndarray or str, shape(n_samples, n_dependent_variables) or 'mapped'
 			Endogenous variables
@@ -266,10 +369,10 @@ class LinearRegressionModelMRI:
 		self : object
 			Fitted model instance.
 		"""
-		
-		if y == 'mapped':
-			assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
-			y = load(self.memmap_y_name_, mmap_mode='r')
+		if isinstance(y, str):
+			if y == 'mapped':
+				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
+				y = load(self.memmap_y_name_, mmap_mode='r')
 		X, y = self._check_inputs(X, y)
 		if not hasattr(self, 'memmap_y_name_'): # confusing: checks for memory mapped y, 
 			if self.memory_mapping_:
@@ -302,7 +405,7 @@ class LinearRegressionModelMRI:
 		self.leverage_ = leverage
 		return(self)
 	
-	def calculate_tstatistics(self, calculate_probability = True):
+	def calculate_tstatistics(self, calculate_probability = False):
 		"""
 		Calculate t-statistics for the model coefficients.
 
@@ -325,12 +428,75 @@ class LinearRegressionModelMRI:
 		self.t_ = t
 		if calculate_probability:
 			self.t_pvalues_ = tdist.sf(np.abs(self.t_), self.df_total_) * 2
-			self.t_qvalues_ = np.ones((self.t_.shape))
+			if self.fdr_correction:
+				self.t_qvalues_ = np.ones((self.t_.shape))
 			for c in range(self.t_pvalues_.shape[0]):
 				if self.fdr_correction:
 					self.t_qvalues_[c] = fdrcorrection(self.t_pvalues_[c])[1]
 		return(self)
-	
+
+	def calculate_tstatistics_tfce(self, adjacency_set, H = 2., E = 0.67):
+		assert hasattr(self, 't_'), "Run calculate_tstatistics() first"
+		calcTFCE = CreateAdjSet(H, E, adjacency_set) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
+		self.t_tfce_positive_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
+		self.t_tfce_negative_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
+		for c in range(self.t_.shape[0]):
+			tval = self.t_[c]
+			stat = tval.astype(np.float32, order = "C")
+			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+			calcTFCE.run(stat, stat_TFCE)
+			self.t_tfce_positive_[c] = stat_TFCE
+			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+			calcTFCE.run(-stat, stat_TFCE)
+			self.t_tfce_negative_[c] = stat_TFCE
+		self.adjacency_set_ = adjacency_set
+		self.tfce_H_ = H
+		self.tfce_E_ = E
+		return(self)
+
+	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, seed):
+		if seed is None:
+			np.random.seed(np.random.randint(4294967295))
+		else:
+			np.random.seed(seed)
+		# regression
+		n, k = X.shape
+		tmp_X = np.random.permutation(X)
+		a = cy_lin_lstsqr_mat(tmp_X, y)
+		tmp_invXX = np.linalg.inv(np.dot(tmp_X.T, tmp_X))
+		tmp_sigma2 = np.divide(np.sum((y - np.dot(tmp_X, a))**2, axis=0), (n - k))
+		tmp_se = fast_se_of_slope(tmp_invXX, tmp_sigma2)
+		tmp_t = np.divide(a , tmp_se)
+		# tfce
+		perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+		tval = tmp_t[contrast_index]
+		stat = tval.astype(np.float32, order = "C")
+		stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+		perm_calcTFCE.run(stat, stat_TFCE)
+		max_pos = stat_TFCE.max()
+		stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+		perm_calcTFCE.run(-stat, stat_TFCE)
+		max_neg = stat_TFCE.max()
+		return(max_pos, max_neg)
+
+	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, output_max_tfce = True):
+		if whiten:
+			y = self.y_ - self.predict(X)
+		else:
+			y = self.y_.copy()
+		print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+		seeds = generate_seeds(n_seeds = int(n_permutations/2))
+		tfce_maximum_values = np.concatenate(Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
+												delayed(self._run_tfce_t_permutation)(i = 0, 
+																				X = self.X_,
+																				y = y, 
+																				contrast_index = contrast_index,
+																				H = self.tfce_H_,
+																				E = self.tfce_E_,
+																				adjacency_set = self.adjacency_set_,
+																				seed = seeds[i]) for i in tqdm(range(int(n_permutations/2)))))
+		self.t_tfce_max_permutations_ = tfce_maximum_values
+
 	def calculate_fstatistics(self, calculate_probability = True):
 		"""
 		Calculate F-statistics for the model.
@@ -419,23 +585,62 @@ class LinearRegressionModelMRI:
 			X = self._stack_ones(X)
 		return(np.dot(X, self.coef_))
 
+	def write_tfce(contrast_index, data_mask, affine)
+		assert hasattr(self, 't_tfce_max_permutations_'), "Run permute_tstatistics_tfce first"
+		contrast_name = "tvalue_con%d" % np.arange(0, len(model.t_),1)[int(contrast_index)]
+		values = model.t_[contrast_index]
 
+		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
+		values = model.t_tfce_positive_[contrast_index]
+		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_positive.nii.gz")
+		oneminuspfwe = 1 - _calculate_permuted_pvalue(model.t_tfce_max_permutations_,values)
+		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_positive_1minusp.nii.gz")
 
+		values = model.t_tfce_negative_[contrast_index]
+		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_negative.nii.gz")
+		oneminuspfwe = 1 - _calculate_permuted_pvalue(model.t_tfce_max_permutations_, values)
+		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_negative_1minusp.nii.gz")
 
-mask_img = nib.load('/mnt/raid1/projects/tris/CRHR1_PROJECT/ENVIRONMENTAL_12SEP2024/MRI_ANALYSIS/mean_FA_skeleton_mask.nii.gz')
-binary_mask = mask_img.get_fdata()
+	def write_nibabel_image(self, values, data_mask, affine, outname):
+		if outname.endswith(".nii.gz"):
+			outdata = np.zeros((data_mask.shape))
+			outdata[data_mask==1] = values
+			nib.save(nib.Nifti1Image(outdata, affine), outname)
 
-adjacency = voxel_adjacency(binary_mask)
-
-
-
-statistic_image
-
-calcTFCE.run()
-
-
-		voxelStat_out = voxelStat.astype(np.float32, order = "C")
-		voxelStat_TFCE = np.zeros_like(voxelStat_out).astype(np.float32, order = "C")
-		TFCEfunc.run(voxelStat_out, voxelStat_TFCE)
+	def save(self, filename):
+		"""
+		Saves a LinearRegressionModelMRI instance as a pickle file.
 		
+		Parameters
+		----------
+			filename : str
+				The name of the pickle file to be saved.
+				
+		Raises
+		----------
+			AssertionError: If the filename does not end with .pkl.
+		"""
+		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
+		with open(filename, 'wb') as f:
+			pickle.dump(self, f)
+
+	@classmethod
+	def load(cls, filename):
+		"""
+		Loads a LinearRegressionModelMRI instance from a pickle file.
 		
+		Parameters
+		----------
+			filename (str): The name of the pickle file to load.
+		Returns
+		-------
+			VoxelImage : object
+				The loaded instance.
+		Raises
+		-------
+			AssertionError: If the filename does not end with .pkl.
+		"""
+		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
+		with open(filename, 'rb') as f:
+			return pickle.load(f)
+

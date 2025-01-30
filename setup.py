@@ -7,7 +7,7 @@ import numpy
 
 PACKAGE_NAME = "tfce_mediation_slim"
 
-BUILD_REQUIRES = ["numpy", "scipy", "matplotlib", "nibabel", "cython", "scikit-learn", "scikit-image", "joblib", "pandas", "tqdm"]
+BUILD_REQUIRES = ["numpy", "scipy", "matplotlib", "nibabel", "cython", "scikit-learn", "scikit-image", "joblib", "pandas", "tqdm", "statsmodels"]
 
 CLASSIFIERS = ["Development Status :: 4 - Beta",
   "Environment :: Console",
