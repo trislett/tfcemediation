@@ -1,11 +1,12 @@
 #!/usr/bin/env python
 
 import os
-import sys
 import warnings
 import pickle
 import gzip
 import shutil
+import gc
+import time
 
 import nibabel as nib
 import numpy as np
@@ -14,12 +15,29 @@ import pandas as pd
 from tqdm import tqdm
 from joblib import Parallel, delayed, wrap_non_picklable_objects, dump, load
 from statsmodels.stats.multitest import fdrcorrection
-from scipy.stats import t as tdist
-from scipy.stats import f as fdist
+from scipy.stats import t as tdist, f as fdist
 from tfcemediation.tfce import CreateAdjSet
-from tfcemediation.cynumstats import cy_lin_lstsqr_mat, tval_fast, fast_se_of_slope, cy_lin_lstsqr_mat_residual
+from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
 
 def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
+	"""
+	Generates a list of random integer seeds.
+	
+	This function creates a list of `n_seeds` random integers within the range [0, maxint],
+	which can be used for initializing random number generators.
+	
+	Parameters
+	----------
+	n_seeds : int
+		The number of random seeds to generate.
+	maxint : int, optional
+		The upper bound for the random integers (default is 2^32 - 1).
+	
+	Returns
+	-------
+	list
+		A list of `n_seeds` randomly generated integers.
+	"""
 	return([np.random.randint(0, maxint) for i in range(n_seeds)])
 
 def dummy_code(variable, iscontinous = False, demean = True):
@@ -293,11 +311,10 @@ class LinearRegressionModelMRI:
 			Reshaped if necessary.
 			
 		y : ndarray
-			Reshaped if necessary.
 		"""
 		X = np.array(X)
 		y = np.array(y)
-		assert len(X) == len(y), "X and y have different lengths"
+		assert X.shape[0] == y.shape[0], "X and y have different lengths"
 		if X.ndim == 1:
 			X = X.reshape(-1,1)
 		if y.ndim == 1:
@@ -350,7 +367,7 @@ class LinearRegressionModelMRI:
 		arr : np.ndarray
 			p-values of statistic array
 		"""
-		return(np.mean(permuted_distribution_arr[:, None] >= statistic_arr, axis=0))
+		return(np.mean(permuted_distribution_arr[:, None] >= statistic_arr, axis=0, dtype=np.float32))
 
 	def fit(self, X, y):
 		"""
@@ -436,6 +453,25 @@ class LinearRegressionModelMRI:
 		return(self)
 
 	def calculate_tstatistics_tfce(self, adjacency_set, H = 2., E = 0.67):
+		"""
+		Computes TFCE-enhanced t-statistics for both positive and negative contrasts.
+		
+		This function applies the TFCE algorithm to enhance statistical maps using adjacency sets.
+		
+		Parameters
+		----------
+		adjacency_set : list
+			A set defining the adjacency relationships between data points.
+		H : float, optional
+			The height exponent for TFCE computation (default is 2.0).
+		E : float, optional
+			The extent exponent for TFCE computation (default is 0.67).
+		
+		Raises
+		------
+		AssertionError
+			If the t-statistics have not been computed before running TFCE.
+		"""
 		assert hasattr(self, 't_'), "Run calculate_tstatistics() first"
 		calcTFCE = CreateAdjSet(H, E, adjacency_set) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
 		self.t_tfce_positive_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
@@ -455,11 +491,40 @@ class LinearRegressionModelMRI:
 		return(self)
 
 	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, seed):
+		"""
+		Runs a single TFCE-based permutation test.
+		
+		This function shuffles the data, computes t-statistics, and applies the TFCE algorithm.
+		
+		Parameters
+		----------
+		i : int
+			The permutation index (unused but required for parallel processing).
+		X : numpy.ndarray
+			The design matrix for the regression model.
+		y : numpy.ndarray
+			The response variable.
+		contrast_index : int
+			The contrast index being tested.
+		H : float
+			The height exponent for TFCE computation.
+		E : float
+			The extent exponent for TFCE computation.
+		adjacency_set : list
+			A set defining adjacency relationships between data points.
+		seed : int or None
+			The random seed for permutation.
+		
+		Returns
+		-------
+		tuple
+			The maximum TFCE values for positive and negative contrasts.
+		"""
 		if seed is None:
 			np.random.seed(np.random.randint(4294967295))
 		else:
 			np.random.seed(seed)
-		# regression
+		# Shuffle and compute regression
 		n, k = X.shape
 		tmp_X = np.random.permutation(X)
 		a = cy_lin_lstsqr_mat(tmp_X, y)
@@ -467,28 +532,58 @@ class LinearRegressionModelMRI:
 		tmp_sigma2 = np.divide(np.sum((y - np.dot(tmp_X, a))**2, axis=0), (n - k))
 		tmp_se = fast_se_of_slope(tmp_invXX, tmp_sigma2)
 		tmp_t = np.divide(a , tmp_se)
-		# tfce
+		
+		# Compute TFCE
 		perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
 		tval = tmp_t[contrast_index]
 		stat = tval.astype(np.float32, order = "C")
+		
 		stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
 		perm_calcTFCE.run(stat, stat_TFCE)
 		max_pos = stat_TFCE.max()
+		
+		# Garbage collections
+		del stat_TFCE, tmp_invXX, tmp_sigma2, tmp_se, tmp_t
+		gc.collect()
+		
 		stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
 		perm_calcTFCE.run(-stat, stat_TFCE)
 		max_neg = stat_TFCE.max()
+		
+		# Garbage collections 2 electric bungalow
+		del stat_TFCE, perm_calcTFCE
+		gc.collect()
+		
 		return(max_pos, max_neg)
 
-	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, output_max_tfce = True):
+	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True):
+		"""
+		Performs TFCE-based permutation testing for a given contrast index.
+		
+		This function computes t-statistic permutations and applies TFCE correction
+		to obtain the maximum TFCE values across permutations.
+
+		Parameters
+		----------
+		contrast_index : int
+			The index of the contrast for permutation testing.
+		n_permutations : int
+			The number of permutations to perform.
+		whiten : bool, optional
+			Whether to whiten the residuals before permutation (default is True).
+		"""
 		if whiten:
-			y = self.y_ - self.predict(X)
+			y = self.y_ - self.predict(self.X_)
 		else:
 			y = self.y_.copy()
+		y = y.astype(np.float32, order = "C")
+		X = self.X_.copy()
+		X = X.astype(np.float32, order = "C")
 		print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
 		seeds = generate_seeds(n_seeds = int(n_permutations/2))
 		tfce_maximum_values = np.concatenate(Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-												delayed(self._run_tfce_t_permutation)(i = 0, 
-																				X = self.X_,
+												delayed(self._run_tfce_t_permutation)(i = i, 
+																				X = X,
 																				y = y, 
 																				contrast_index = contrast_index,
 																				H = self.tfce_H_,
@@ -521,7 +616,6 @@ class LinearRegressionModelMRI:
 		self.f_ = np.divide(np.divide(self.ssb_, self.df_between_), self.mse_)
 		self.Rsqr_ = 1 - (self.sse_/self.sst_)
 		if calculate_probability:
-			f.sf(sim_Fmodel, DF_Between, DF_Within)
 			self.f_pvalues_ = fdist.sf(self.f_ , self.df_between_, self.df_within_)
 			if self.fdr_correction:
 				self.f_qvalues_ = fdrcorrection(self.f_pvalues_)[1]
@@ -585,23 +679,59 @@ class LinearRegressionModelMRI:
 			X = self._stack_ones(X)
 		return(np.dot(X, self.coef_))
 
-	def write_tfce(contrast_index, data_mask, affine)
+	def write_tfce_results(self, contrast_index, data_mask, affine):
+		"""
+		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
+		
+		This function saves multiple NIfTI images containing the t-values, positive and negative
+		TFCE values, and their respective corrected p-values.
+
+		Parameters
+		----------
+		contrast_index : int
+			The index of the contrast for which TFCE results will be written.
+		data_mask : numpy.ndarray
+			A binary mask indicating valid data points in the brain image.
+		affine : numpy.ndarray
+			The affine transformation matrix for the NIfTI images.
+
+		Raises
+		------
+		AssertionError
+			If the required TFCE permutations have not been computed.
+		"""
 		assert hasattr(self, 't_tfce_max_permutations_'), "Run permute_tstatistics_tfce first"
-		contrast_name = "tvalue_con%d" % np.arange(0, len(model.t_),1)[int(contrast_index)]
-		values = model.t_[contrast_index]
+		contrast_name = "tvalue_con%d" % np.arange(0, len(self.t_),1)[int(contrast_index)]
+		values = self.t_[contrast_index]
 
 		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
-		values = model.t_tfce_positive_[contrast_index]
+		values = self.t_tfce_positive_[contrast_index]
 		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_positive.nii.gz")
-		oneminuspfwe = 1 - _calculate_permuted_pvalue(model.t_tfce_max_permutations_,values)
+		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_,values)
 		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_positive_1minusp.nii.gz")
 
-		values = model.t_tfce_negative_[contrast_index]
+		values = self.t_tfce_negative_[contrast_index]
 		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_negative.nii.gz")
-		oneminuspfwe = 1 - _calculate_permuted_pvalue(model.t_tfce_max_permutations_, values)
+		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_, values)
 		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_negative_1minusp.nii.gz")
 
 	def write_nibabel_image(self, values, data_mask, affine, outname):
+		"""
+		Saves an array of values as a NIfTI image.
+		
+		This function applies a binary mask to the data and saves it as a NIfTI file using the given affine transformation.
+
+		Parameters
+		----------
+		values : numpy.ndarray
+			The data values to be saved in the NIfTI image.
+		data_mask : numpy.ndarray
+			A binary mask indicating valid data points.
+		affine : numpy.ndarray
+			The affine transformation matrix for the NIfTI image.
+		outname : str
+			The filename for the output NIfTI image. Must end with ".nii.gz".
+		"""
 		if outname.endswith(".nii.gz"):
 			outdata = np.zeros((data_mask.shape))
 			outdata[data_mask==1] = values
@@ -643,4 +773,3 @@ class LinearRegressionModelMRI:
 		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
 		with open(filename, 'rb') as f:
 			return pickle.load(f)
-
