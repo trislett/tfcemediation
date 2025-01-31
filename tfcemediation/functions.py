@@ -7,6 +7,7 @@ import gzip
 import shutil
 import gc
 import time
+import re
 
 import nibabel as nib
 import numpy as np
@@ -18,6 +19,7 @@ from statsmodels.stats.multitest import fdrcorrection
 from scipy.stats import t as tdist, f as fdist
 from tfcemediation.tfce import CreateAdjSet
 from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
+from patsy import dmatrix
 
 def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	"""
@@ -84,6 +86,74 @@ def stack_ones(arr):
 	
 	"""
 	return(np.column_stack([np.ones(len(arr)),arr]))
+
+def sanitize_columns(s):
+	"""
+	Sanitizes a string to create a valid and consistent column name.
+	
+	This function performs the following transformations on the input string:
+	- Replaces occurrences of '[T.' with '_'
+	- Removes all non-alphanumeric characters, excluding spaces and hyphens
+	- Replaces spaces with underscores
+	- Converts the string to lowercase
+	- Strips leading and trailing underscores
+
+	Parameters
+	----------
+	s : str
+		The input string to sanitize.
+
+	Returns
+	---------
+	str
+		The sanitized string.
+	"""
+	s = s.replace('[T.', '_')
+	s = re.sub(r'[^\w\s-]', '', s)
+	s = s.replace(' ', '_')
+	s = s.lower()
+	s = s.strip('_')
+	return(s)
+
+
+def scale_arr(arr, centre = True, scale = True, div_sqrt_nvar = False, axis = 0):
+	"""
+	Helper function to center and scale data.
+
+	Parameters:
+	-----------
+	arr : np.ndarray
+		Data to be scaled
+	centre : bool
+		A boolean that specifies whether to center data.
+		Default value is True.
+	scale : bool
+		A boolean that specifies whether to scale data.
+		Default value is True.
+	div_sqrt_numvar : bool
+		A boolean that specifies whether to divide the views by the square root of the number of variables.
+		Default value is True.
+	axis : int
+		An integer that specifies the axis to use when computing the mean and standard deviation.
+
+	Returns:
+	--------
+	x : np.ndarray
+		The scaled data.
+	"""
+	if arr.ndim == 1:
+		arr = arr.reshape(-1,1)
+	x = np.array(arr)
+	x_mean = np.mean(x, axis = axis)
+	x_std = np.std(x, axis = axis)
+	if centre:
+		x = x - x_mean
+	if scale:
+		x = np.divide(x, x_std)
+	if div_sqrt_nvar:
+		x = np.divide(x, np.sqrt(x.shape[1]))
+	return(x)
+
 
 class VoxelImage:
 	"""
@@ -265,7 +335,7 @@ class LinearRegressionModelMRI:
 	"""
 	Linear Regression Model
 	"""
-	def __init__(self, *, fit_intercept = True, n_jobs = 16, memory_mapping = False, use_tmp = True, fdr_correction = False, adjacency_set = None, image_mask = None):
+	def __init__(self, *, fit_intercept = True, n_jobs = 16, memory_mapping = False, use_tmp = True, fdr_correction = False, image_mask = None):
 		"""
 		Initialize the LinearRegressionModel instance.
 
@@ -289,8 +359,7 @@ class LinearRegressionModelMRI:
 		self.memory_mapping_ = memory_mapping
 		self.use_tmp_ = use_tmp
 		self.tmp_directory_ = os.environ.get("TMPDIR", "/tmp/")
-		self.fdr_correction = fdr_correction
-		self.adjacency_set = adjacency_set
+		self.fdr_correction_ = fdr_correction
 		self.image_mask = image_mask
 
 	def _check_inputs(self, X, y):
@@ -369,6 +438,69 @@ class LinearRegressionModelMRI:
 		"""
 		return(np.mean(permuted_distribution_arr[:, None] >= statistic_arr, axis=0, dtype=np.float32))
 
+	def load_pandas_dataframe(self, df):
+		"""
+		Loads a pandas DataFrame into the object
+		
+		Parameters
+		----------
+		df : pd.DataFrame
+			The pandas DataFrame to load
+		
+		Returns
+		---------
+		None
+			This method does not return anything, it assigns the DataFrame to the object attribute.
+		"""
+		assert isinstance(df, pd.DataFrame), "df must be a pandas dataframe"
+		self.df_ = df
+
+	def load_csv_dataframe(self, csv_file):
+		"""
+		Loads a pandas DataFrame from a CSV file into the object
+		
+		Parameters
+		----------
+		csv_file : str
+			Path to the CSV file to load into the pandas DataFrame
+		
+		Returns
+		---------
+		None
+			This method does not return anything, it assigns the DataFrame to the object attribute.
+		"""
+		assert csv_file.endswith(".csv"), "csv_file end with .csv"
+		self.df_ = pd.read_csv(csv_file)
+
+	def dummy_code_from_formula(self, formula_like, save_columns_names = True, scale_dummy_arr = True):
+		"""
+		Creates dummy-coded variables using patsy from the DataFrame and optionally scales them
+		
+		Parameters
+		----------
+		formula_like : str
+			The formula that specifies which columns to include in the dummy coding (e.g., 'category1 + category2')
+		
+		save_columns_names : bool, optional, default=True
+			If True, stores the names of the dummy-coded columns in the object attribute `t_contrast_names_`
+		
+		scale_dummy_arr : bool, optional, default=True
+			If True, scales the resulting dummy variables (excluding the intercept column)
+		
+		Returns
+		---------
+		np.ndarray
+			The scaled dummy-coded variables as a numpy array, with the intercept column excluded
+		"""
+		assert hasattr(self, 'df_'), "Pandas dataframe is missing (self.df_) run load_pandas_dataframe or load_csv_dataframe first"
+		df_dummy = dmatrix(formula_like, data=self.df_, NA_action="raise", return_type='dataframe')
+		if save_columns_names:
+			colnames =  df_dummy.columns.values
+			self.t_contrast_names_ = np.array([sanitize_columns(col) for col in colnames])
+		dummy_arr = scale_arr(df_dummy.values[:,1:])
+		return(dummy_arr)
+
+
 	def fit(self, X, y):
 		"""
 		Fit the linear regression model to the data.
@@ -445,10 +577,10 @@ class LinearRegressionModelMRI:
 		self.t_ = t
 		if calculate_probability:
 			self.t_pvalues_ = tdist.sf(np.abs(self.t_), self.df_total_) * 2
-			if self.fdr_correction:
+			if self.fdr_correction_:
 				self.t_qvalues_ = np.ones((self.t_.shape))
 			for c in range(self.t_pvalues_.shape[0]):
-				if self.fdr_correction:
+				if self.fdr_correction_:
 					self.t_qvalues_[c] = fdrcorrection(self.t_pvalues_[c])[1]
 		return(self)
 
@@ -572,16 +704,15 @@ class LinearRegressionModelMRI:
 		whiten : bool, optional
 			Whether to whiten the residuals before permutation (default is True).
 		"""
+		assert hasattr(self, 'adjacency_set_'), "Run calculate_tstatistics_tfce first"
 		if whiten:
 			y = self.y_ - self.predict(self.X_)
 		else:
 			y = self.y_.copy()
-		y = y.astype(np.float32, order = "C")
 		X = self.X_.copy()
-		X = X.astype(np.float32, order = "C")
 		print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
 		seeds = generate_seeds(n_seeds = int(n_permutations/2))
-		tfce_maximum_values = np.concatenate(Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
+		tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
 												delayed(self._run_tfce_t_permutation)(i = i, 
 																				X = X,
 																				y = y, 
@@ -589,7 +720,8 @@ class LinearRegressionModelMRI:
 																				H = self.tfce_H_,
 																				E = self.tfce_E_,
 																				adjacency_set = self.adjacency_set_,
-																				seed = seeds[i]) for i in tqdm(range(int(n_permutations/2)))))
+																				seed = seeds[i]) for i in tqdm(range(int(n_permutations/2))))
+		tfce_maximum_values = np.concatenate(tfce_maximum_values)
 		self.t_tfce_max_permutations_ = tfce_maximum_values
 
 	def calculate_fstatistics(self, calculate_probability = True):
@@ -617,7 +749,7 @@ class LinearRegressionModelMRI:
 		self.Rsqr_ = 1 - (self.sse_/self.sst_)
 		if calculate_probability:
 			self.f_pvalues_ = fdist.sf(self.f_ , self.df_between_, self.df_within_)
-			if self.fdr_correction:
+			if self.fdr_correction_:
 				self.f_qvalues_ = fdrcorrection(self.f_pvalues_)[1]
 		return(self)
 
@@ -701,7 +833,10 @@ class LinearRegressionModelMRI:
 			If the required TFCE permutations have not been computed.
 		"""
 		assert hasattr(self, 't_tfce_max_permutations_'), "Run permute_tstatistics_tfce first"
-		contrast_name = "tvalue_con%d" % np.arange(0, len(self.t_),1)[int(contrast_index)]
+		if hasattr(self, 't_contrast_names_') and self.t_.shape[0] == len(self.t_contrast_names_):
+			contrast_name = "%s_tvalue" % self.t_contrast_names_[int(contrast_index)]
+		else:
+			contrast_name = "con%d_tvalue" % np.arange(0, len(self.t_),1)[int(contrast_index)]
 		values = self.t_[contrast_index]
 
 		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
