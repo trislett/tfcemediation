@@ -239,6 +239,36 @@ class VoxelImage:
 			raise TypeError("image_path has to be a string or a list of strings")
 
 	def _check_mask(self, mask_data, connectivity = 3):
+		"""
+		Ensures the binary mask is a single continuous region by keeping only the largest connected component.
+
+		This method checks for disconnected regions in the binary mask and retains only the largest 
+		connected component based on the specified connectivity. If multiple disconnected regions 
+		are detected, the largest one is kept, and the mask is updated accordingly.
+
+		Parameters
+		----------
+		mask_data : np.ndarray
+			A 3D NumPy array representing the binary mask, containing only 0s and 1s.
+		connectivity : int, default=3
+			The connectivity used to define connected components in 3D space:
+			- 1: 6-connectivity (faces only)
+			- 2: 18-connectivity (faces and edges)
+			- 3: 26-connectivity (faces, edges, and corners)
+
+		Returns
+		-------
+		np.ndarray
+			The processed binary mask where only the largest connected component is retained.
+
+		Notes
+		-----
+		- If multiple disconnected components exist, the largest one is retained based on voxel count.
+		- If only one continuous region exists, the mask remains unchanged.
+		- The function assumes that the background (0s) is separate from the mask (1s).
+		- If the mask is fully disconnected from the background, the largest region is selected 
+		  based on the highest voxel count.
+		"""
 		labeled_array, num_labels = scipy_label(mask_data, structure=generate_binary_structure(3, connectivity))
 		sizes = np.bincount(labeled_array.ravel())
 		if num_labels > 2:
@@ -246,6 +276,11 @@ class VoxelImage:
 				sizes[0] = 0
 				print("Non-continous mask detected with sizes: ", sizes[1:])
 				print("Rebuilding mask detected largest continous label [%d]" % sizes[1])
+				largest_label = sizes.argmax()
+				mask_data == (labeled_array == largest_label)*1
+			else:
+				print("Non-continous mask detected with sizes: ", sizes)
+				print("Rebuilding mask detected largest continous label [%d]" % sizes[0])
 				largest_label = sizes.argmax()
 				mask_data == (labeled_array == largest_label)*1
 		return(mask_data)
@@ -259,7 +294,7 @@ class VoxelImage:
 			data_mask : np.array
 				A binary mask of non-zero data.
 			connectivity_directions : int, default=26
-				Number of connectivity directions {8 or 26}.
+				Number of connectivity directions {6 or 26}.
 				Use 26 is all direction including diagonals (e.g., analysis of tbss skeleton data).
 				Use 8 for only the immediatiately adjacent voxel (e.g., analysis of second level fMRI data).
 		"""
@@ -300,15 +335,15 @@ class VoxelImage:
 		Parameters
 		----------
 			connectivity_directions : int, default=26
-				Number of connectivity directions {8 or 26}.
+				Number of connectivity directions {6 or 26}.
 				Use 26 is all direction including diagonals (e.g., analysis of tbss skeleton data).
 				Use 8 for only the immediatiately adjacent voxel (e.g., analysis of second level fMRI data).
 		Raises
 		----------
 			AssertionError: connectivity_directions is not 8 or 26.
 		"""
-		assert connectivity_directions==8 or connectivity_directions==26, "adjacency_directions must equal {8, 26}"
-		if connectivity_directions == 8:
+		assert connectivity_directions==6 or connectivity_directions==26, "adjacency_directions must equal {8, 26}"
+		if connectivity_directions == 6:
 			new_mask = self._check_mask(self.mask_data_, connectivity = 1)
 			if new_mask.sum() != self.mask_data_.sum():
 				print("Resizing data to new mask")
@@ -616,6 +651,9 @@ class LinearRegressionModelMRI:
 		t = np.divide(self.coef_ , se)
 		self.se_ = se
 		self.t_ = t
+		if np.sum(~np.isfinite(self.t_)) > 0:
+			warnings.warn("nan values detected. They will be set to zero.", UserWarning)
+			self.t_[~np.isfinite(self.t_)] = 0
 		if calculate_probability:
 			self.t_pvalues_ = tdist.sf(np.abs(self.t_), self.df_total_) * 2
 			if self.fdr_correction_:
