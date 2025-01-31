@@ -20,6 +20,8 @@ from scipy.stats import t as tdist, f as fdist
 from tfcemediation.tfce import CreateAdjSet
 from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
 from patsy import dmatrix
+from scipy.ndimage import label as scipy_label
+from scipy.ndimage import generate_binary_structure
 
 def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	"""
@@ -189,6 +191,7 @@ class VoxelImage:
 		mask = nib.load(binary_mask_path)
 		mask_data = mask.get_fdata()
 		assert np.all(np.unique(mask_data)==np.array([0,1])), "binary_mask_path must be a binary image containing only {1,0}."
+		mask_data = self._check_mask(mask_data, connectivity = 3)
 		self.mask_data_ = mask_data
 		self.affine_ = mask.affine
 		self.header_ = mask.header.copy()
@@ -235,7 +238,19 @@ class VoxelImage:
 		else:
 			raise TypeError("image_path has to be a string or a list of strings")
 
-	def _create_adjac_voxel(self, data_mask, connectivity_directions=26): # default is 26 directions
+	def _check_mask(self, mask_data, connectivity = 3):
+		labeled_array, num_labels = scipy_label(mask_data, structure=generate_binary_structure(3, connectivity))
+		sizes = np.bincount(labeled_array.ravel())
+		if num_labels > 2:
+			if mask_data[labeled_array == 0].sum() == 0:
+				sizes[0] = 0
+				print("Non-continous mask detected with sizes: ", sizes[1:])
+				print("Rebuilding mask detected largest continous label [%d]" % sizes[1])
+				largest_label = sizes.argmax()
+				mask_data == (labeled_array == largest_label)*1
+		return(mask_data)
+
+	def _create_adjac_voxel(self, data_mask, connectivity_directions=26):
 		"""
 		Generates the adjacency set for the voxel image based on connectivity.
 		
@@ -248,6 +263,7 @@ class VoxelImage:
 				Use 26 is all direction including diagonals (e.g., analysis of tbss skeleton data).
 				Use 8 for only the immediatiately adjacent voxel (e.g., analysis of second level fMRI data).
 		"""
+		
 		data_mask = data_mask.astype(np.float32)
 		ind = np.where(data_mask == 1)
 		dm = np.zeros_like(data_mask)
@@ -292,6 +308,13 @@ class VoxelImage:
 			AssertionError: connectivity_directions is not 8 or 26.
 		"""
 		assert connectivity_directions==8 or connectivity_directions==26, "adjacency_directions must equal {8, 26}"
+		if connectivity_directions == 8:
+			new_mask = self._check_mask(self.mask_data_, connectivity = 1)
+			if new_mask.sum() != self.mask_data_.sum():
+				print("Resizing data to new mask")
+				self.image_data_ = self.image_data_[new_mask[self.mask_data_==1] == 1]
+				self.mask_data_ = new_mask
+				self.n_voxels_ = int(self.mask_data.sum())
 		self.adjacency_ = self._create_adjac_voxel(self.mask_data_, connectivity_directions=connectivity_directions)
 
 	def save(self, filename):
@@ -500,7 +523,25 @@ class LinearRegressionModelMRI:
 		dummy_arr = scale_arr(df_dummy.values[:,1:])
 		return(dummy_arr)
 
+	def print_t_contrast_indices(self):
+		"""
+		Print the indices of t-contrasts.
 
+		If the attribute `t_contrast_names_` exists, this function prints the index 
+		and corresponding contrast name. Otherwise, it prints the numeric indices 
+		for all available contrasts.
+
+		Parameters:
+		-----------
+		self : object
+			The instance containing `t_contrast_names_` and `t_` attributes.
+		"""
+		if hasattr(self, 't_contrast_names_'):
+			for t in range(len(self.t_contrast_names_)):
+				print("[index=%d] ==> %s" % (t, self.t_contrast_names_[t]))
+		else:
+			print(np.arange(self.t_.shape[0]))
+	
 	def fit(self, X, y):
 		"""
 		Fit the linear regression model to the data.
@@ -618,8 +659,8 @@ class LinearRegressionModelMRI:
 			calcTFCE.run(-stat, stat_TFCE)
 			self.t_tfce_negative_[c] = stat_TFCE
 		self.adjacency_set_ = adjacency_set
-		self.tfce_H_ = H
-		self.tfce_E_ = E
+		self.tfce_H_ = float(H)
+		self.tfce_E_ = float(E)
 		return(self)
 
 	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, seed):
@@ -834,21 +875,21 @@ class LinearRegressionModelMRI:
 		"""
 		assert hasattr(self, 't_tfce_max_permutations_'), "Run permute_tstatistics_tfce first"
 		if hasattr(self, 't_contrast_names_') and self.t_.shape[0] == len(self.t_contrast_names_):
-			contrast_name = "%s_tvalue" % self.t_contrast_names_[int(contrast_index)]
+			contrast_name = "tvalue-%s" % self.t_contrast_names_[int(contrast_index)]
 		else:
-			contrast_name = "con%d_tvalue" % np.arange(0, len(self.t_),1)[int(contrast_index)]
+			contrast_name = "tvalue-con%d" % np.arange(0, len(self.t_),1)[int(contrast_index)]
 		values = self.t_[contrast_index]
 
 		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
 		values = self.t_tfce_positive_[contrast_index]
-		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_positive.nii.gz")
+		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.nii.gz")
 		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_,values)
-		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_positive_1minusp.nii.gz")
+		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.nii.gz")
 
 		values = self.t_tfce_negative_[contrast_index]
-		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_negative.nii.gz")
+		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.nii.gz")
 		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_, values)
-		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "_tfce_negative_1minusp.nii.gz")
+		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
 
 	def write_nibabel_image(self, values, data_mask, affine, outname):
 		"""
