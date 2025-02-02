@@ -630,116 +630,6 @@ class LinearRegressionModelMRI:
 		self.leverage_ = leverage
 		return(self)
 
-	def _calculate_beta_se(self, exog, endog, index_var = -1):
-		"""
-		Calculate the standard error for the coefficients using linear regression.
-		Parameters
-		----------
-		exog : np.ndarray, shape (n_samples, n_features)
-			Exogenous variables (independent variables).
-		endog : np.ndarray, shape (n_samples, n_dependent_variables)
-			Endogenous variables (dependent variables).
-		index_var : int, optional, default -1
-			Index of the variable for which standard error is calculated.
-
-		Returns
-		-------
-		tuple
-			A tuple of (coefficient, standard error) for the specified variable.
-		"""
-
-		n = endog.shape[0]
-		k = exog.shape[1]
-		a = cy_lin_lstsqr_mat(exog, endog)
-		sigma2 = np.sum((endog - np.dot(exog,a))**2,axis=0) / (n - k)
-		invXX = np.linalg.inv(np.dot(exog.T, exog))
-		se = fast_se_of_slope(invXX, sigma2)
-		return(a[index_var], se[index_var])
-	def _calculate_sobel(self, exogA, endogA, exogB, endogB):
-		"""
-		Calculate the Sobel z-score for mediation analysis.
-
-		Parameters
-		----------
-		exogA : np.ndarray, shape (n_samples, n_features)
-			Exogenous variables for the first stage.
-		endogA : np.ndarray, shape (n_samples,)
-			Endogenous variable for the first stage.
-		exogB : np.ndarray, shape (n_samples, n_features)
-			Exogenous variables for the second stage.
-		endogB : np.ndarray, shape (n_samples,)
-			Endogenous variable for the second stage.
-
-		Returns
-		-------
-		float
-			Sobel z-score for the mediation analysis.
-		"""
-		beta_a, se_a = self._calculate_beta_se(exogA, endogA, index_var = -1)
-		beta_b, se_b = self._calculate_beta_se(exogB, endogB, index_var = -1)
-		sobel_z = beta_a*beta_b / np.sqrt((beta_b**2 * se_a**2) + (beta_a**2 * se_b**2))
-		return(sobel_z)
-
-	def mediation_sobelz_from_formula(self, mri_data, X = None, M = None, y = None, covariates = None, calculate_probability = True):
-		"""
-		Perform Sobel mediation analysis using the provided formulas.
-
-		Parameters
-		----------
-		mri_data : np.ndarray, shape (n_samples,)
-			MRI data.
-		X : np.ndarray, shape (n_samples, n_features), optional
-			Exogenous variable for the first stage in the mediation model.
-		M : np.ndarray, shape (n_samples, n_features), optional
-			Mediating variable in the model.
-		y : np.ndarray, shape (n_samples, n_features), optional
-			Endogenous variable (dependent variable) for the second stage.
-		covariates : np.ndarray, shape (n_samples, n_covariates), optional
-			Covariates to include in the model.
-		calculate_probability : bool, default=True
-			Whether to calculate the p-values for the z-statistics.
-		
-		Returns
-		-------
-		self : object
-			Fitted model with mediation z-scores and p-values.
-		"""
-		assert hasattr(self, 'df_'), "Pandas dataframe is missing (self.df_) run load_pandas_dataframe or load_csv_dataframe first"
-		not_none_count = sum(val is not None for val in (X, M, y))
-		assert not_none_count == 2, "Two of X, M, and y must not be None"
-		if X is not None:
-			varA = self.dummy_code_from_formula(X)
-			assert varA.shape[1]==1, "Currently only 1d variables are supported"
-			if covariates is not None:
-				exogA = self._stack_ones(np.column_stack((self.dummy_code_from_formula(covariates), varA)))
-			else:
-				exogA = self._stack_ones(varA)
-			if y is not None:
-				exogB = np.column_stack((exogA, self.dummy_code_from_formula(y)))
-				endogA = mri_data
-				endogB = self.dummy_code_from_formula(y)
-			if M is not None:
-				exogB = np.column_stack((exogA, self.dummy_code_from_formula(M)))
-				endogA = self.dummy_code_from_formula(M)
-				endogB = mri_data
-		else:
-			varA = self.dummy_code_from_formula(M)
-			if covariates is not None:
-				exogA = self._stack_ones(np.column_stack((self.dummy_code_from_formula(covariates), varA)))
-			else:
-				exogA = self._stack_ones(varA)
-			assert varA.shape[1]==1, "Currently only 1d variables are supported"
-			exogB = np.column_stack((exogA, self.dummy_code_from_formula(y)))
-			endogA = mri_data
-			endogB = mri_data
-		self.mediation_z_ = self._calculate_sobel(exogA, endogA, exogB, endogB)
-		if calculate_probability:
-			self.mediation_z_pvalues_ = 2 * norm.sf(abs(self.mediation_z_))
-		self.mediation_exogA_ = exogA
-		self.mediation_exogB_ = exogB
-		self.mediation_endogA_ = endogA
-		self.mediation_endogB_ = endogB
-
 	def calculate_tstatistics(self, calculate_probability = False):
 		"""
 		Calculate t-statistics for the model coefficients.
@@ -942,6 +832,236 @@ class LinearRegressionModelMRI:
 				self.f_qvalues_ = fdrcorrection(self.f_pvalues_)[1]
 		return(self)
 
+	def _calculate_beta_se(self, exog, endog, index_var = -1):
+		"""
+		Calculate the standard error for the coefficients using linear regression.
+		Parameters
+		----------
+		exog : np.ndarray, shape (n_samples, n_features)
+			Exogenous variables (independent variables).
+		endog : np.ndarray, shape (n_samples, n_dependent_variables)
+			Endogenous variables (dependent variables).
+		index_var : int, optional, default -1
+			Index of the variable for which standard error is calculated.
+
+		Returns
+		-------
+		tuple
+			A tuple of (coefficient, standard error) for the specified variable.
+		"""
+
+		n = endog.shape[0]
+		k = exog.shape[1]
+		a = cy_lin_lstsqr_mat(exog, endog)
+		sigma2 = np.sum((endog - np.dot(exog,a))**2,axis=0) / (n - k)
+		invXX = np.linalg.inv(np.dot(exog.T, exog))
+		se = fast_se_of_slope(invXX, sigma2)
+		return(a[index_var], se[index_var])
+	
+	def _calculate_sobel(self, exogA, endogA, exogB, endogB):
+		"""
+		Calculate the Sobel z-score for mediation analysis.
+
+		Parameters
+		----------
+		exogA : np.ndarray, shape (n_samples, n_features)
+			Exogenous variables for the first stage.
+		endogA : np.ndarray, shape (n_samples,)
+			Endogenous variable for the first stage.
+		exogB : np.ndarray, shape (n_samples, n_features)
+			Exogenous variables for the second stage.
+		endogB : np.ndarray, shape (n_samples,)
+			Endogenous variable for the second stage.
+
+		Returns
+		-------
+		float
+			Sobel z-score for the mediation analysis.
+		"""
+		beta_a, se_a = self._calculate_beta_se(exogA, endogA, index_var = -1)
+		beta_b, se_b = self._calculate_beta_se(exogB, endogB, index_var = -1)
+		sobel_z = beta_a*beta_b / np.sqrt((beta_b**2 * se_a**2) + (beta_a**2 * se_b**2))
+		return(sobel_z)
+
+	def calculate_mediation_z_from_formula(self, mri_data, X = None, M = None, y = None, covariates = None, calculate_probability = True):
+		"""
+		Perform Sobel mediation analysis using the provided formulas.
+
+		Parameters
+		----------
+		mri_data : np.ndarray, shape (n_samples,)
+			MRI data.
+		X : np.ndarray, shape (n_samples, n_features), optional
+			Exogenous variable for the first stage in the mediation model.
+		M : np.ndarray, shape (n_samples, n_features), optional
+			Mediating variable in the model.
+		y : np.ndarray, shape (n_samples, n_features), optional
+			Endogenous variable (dependent variable) for the second stage.
+		covariates : np.ndarray, shape (n_samples, n_covariates), optional
+			Covariates to include in the model.
+		calculate_probability : bool, default=True
+			Whether to calculate the p-values for the z-statistics.
+		
+		Returns
+		-------
+		self : object
+			Fitted model with mediation z-scores and p-values.
+		"""
+		assert hasattr(self, 'df_'), "Pandas dataframe is missing (self.df_) run load_pandas_dataframe or load_csv_dataframe first"
+		not_none_count = sum(val is not None for val in (X, M, y))
+		assert not_none_count == 2, "Two of X, M, and y must not be None"
+		if X is not None:
+			varA = self.dummy_code_from_formula(X)
+			assert varA.shape[1]==1, "Currently only 1d variables are supported"
+			if covariates is not None:
+				exogA = self._stack_ones(np.column_stack((self.dummy_code_from_formula(covariates), varA)))
+			else:
+				exogA = self._stack_ones(varA)
+			if y is not None:
+				exogB = np.column_stack((exogA, self.dummy_code_from_formula(y)))
+				endogA = mri_data
+				endogB = self.dummy_code_from_formula(y)
+			if M is not None:
+				exogB = np.column_stack((exogA, self.dummy_code_from_formula(M)))
+				endogA = self.dummy_code_from_formula(M)
+				endogB = mri_data
+		else:
+			varA = self.dummy_code_from_formula(M)
+			if covariates is not None:
+				exogA = self._stack_ones(np.column_stack((self.dummy_code_from_formula(covariates), varA)))
+			else:
+				exogA = self._stack_ones(varA)
+			assert varA.shape[1]==1, "Currently only 1d variables are supported"
+			exogB = np.column_stack((exogA, self.dummy_code_from_formula(y)))
+			endogA = mri_data
+			endogB = mri_data
+		self.mediation_z_ = self._calculate_sobel(exogA, endogA, exogB, endogB)
+		if calculate_probability:
+			self.mediation_z_pvalues_ = 2 * norm.sf(abs(self.mediation_z_))
+		self.mediation_exogA_ = exogA
+		self.mediation_exogB_ = exogB
+		self.mediation_endogA_ = endogA
+		self.mediation_endogB_ = endogB
+
+	def calculate_mediation_z_tfce(self, adjacency_set, H = 2., E = 0.67):
+		"""
+		Computes TFCE-enhanced t-statistics for both positive and negative contrasts.
+		
+		This function applies the TFCE algorithm to enhance statistical maps using adjacency sets.
+		
+		Parameters
+		----------
+		adjacency_set : list
+			A set defining the adjacency relationships between data points.
+		H : float, optional
+			The height exponent for TFCE computation (default is 2.0).
+		E : float, optional
+			The extent exponent for TFCE computation (default is 0.67).
+		
+		Raises
+		------
+		AssertionError
+			If the t-statistics have not been computed before running TFCE.
+		"""
+		assert hasattr(self, 'mediation_z_'), "Run calculate_tstatistics() first"
+		calcTFCE = CreateAdjSet(H, E, adjacency_set) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
+		zval = self.mediation_z_.astype(np.float32, order = "C")
+		stat = zval.astype(np.float32, order = "C")
+		stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+		calcTFCE.run(stat, stat_TFCE)
+		self.mediation_z_tfce_ = stat_TFCE
+		self.adjacency_set_ = adjacency_set
+		self.tfce_H_ = float(H)
+		self.tfce_E_ = float(E)
+		return(self)
+
+	def _run_tfce_mediation_z_permutation(self, i, exogA, endogA, exogB, endogB, H, E, adjacency_set, seed):
+		"""
+		Perform a single TFCE-based permutation test for mediation analysis.
+
+		This method shuffles the data, calculates Sobel z-scores, and applies the TFCE (Threshold-Free Cluster Enhancement) algorithm to 
+		assess the statistical significance of the mediation effect under the permutation scheme. The function computes the maximum TFCE 
+		value for the permuted z-statistic, providing insight into the robustness of the mediation effect.
+
+		Parameters
+		----------
+		i : int
+			The permutation index. This parameter is required for parallel processing but is not used directly within the function.
+		exogA : np.ndarray, shape (n_samples, n_features)
+			Exogenous variables for the first stage in the mediation analysis.
+		endogA : np.ndarray, shape (n_samples,)
+			Endogenous variable for the first stage in the mediation analysis.
+		exogB : np.ndarray, shape (n_samples, n_features)
+			Exogenous variables for the second stage in the mediation analysis.
+		endogB : np.ndarray, shape (n_samples,)
+			Endogenous variable for the second stage in the mediation analysis.
+		H : float
+			The height exponent used in the TFCE computation. Controls the sensitivity to large values in the statistic.
+		E : float
+			The extent exponent used in the TFCE computation. Controls the sensitivity to the spatial extent of clusters.
+		adjacency_set : list
+			A list defining adjacency relationships between data points, typically used for establishing neighborhood connections in the TFCE algorithm.
+		seed : int or None
+			The random seed for permutation. If `None`, a random seed will be selected.
+
+		Returns
+		-------
+		float
+			The maximum TFCE value calculated for the permuted z-statistic (mediation effect) during the permutation test.
+		"""
+		if seed is None:
+			np.random.seed(np.random.randint(4294967295))
+		else:
+			np.random.seed(seed)
+		perm_index = np.random.permutation(range(len(exogA)))
+		tmp_z = self._calculate_sobel(exogA[perm_index], endogA, exogB[perm_index], endogB)
+
+		# Compute TFCE
+		perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+		stat = tmp_z.astype(np.float32, order = "C")
+		stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+		perm_calcTFCE.run(stat, stat_TFCE)
+		max_tfce = stat_TFCE.max()
+
+		# Garbage collections
+		del stat_TFCE, stat, perm_calcTFCE, tmp_z
+		gc.collect()
+
+		return(max_tfce)
+
+	def permute_mediation_z_tfce(self, n_permutations, whiten = True):
+		"""
+		Perform TFCE-based permutation testing for a given contrast index.
+
+		This method runs a series of permutations, computes Sobel z-scores, and applies the TFCE 
+		(Threshold-Free Cluster Enhancement) correction to obtain the maximum TFCE values across permutations.
+
+		Parameters
+		----------
+		n_permutations : int
+			The number of permutations to perform in the permutation testing process.
+
+		Returns
+		-------
+		None
+			The function updates the `mediation_z_tfce_max_permutations_` attribute with the computed
+			maximum TFCE values across all permutations.
+		"""
+		assert hasattr(self, 'adjacency_set_'), "Run calculate_tstatistics_tfce first"
+		print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+		seeds = generate_seeds(n_seeds = n_permutations)
+		tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
+												delayed(self._run_tfce_mediation_z_permutation)(i = i, 
+																				exogA = self.mediation_exogA_,
+																				endogA = self.mediation_endogA_,
+																				exogB = self.mediation_exogB_,
+																				endogB = self.mediation_endogB_,
+																				H = self.tfce_H_,
+																				E = self.tfce_E_,
+																				adjacency_set = self.adjacency_set_,
+																				seed = seeds[i]) for i in tqdm(range(n_permutations)))
+		self.mediation_z_tfce_max_permutations_ = tfce_maximum_values
+
 	def outlier_detection(self, f_quantile = 0.99, cooks_distance_threshold = None, low_ram = True):
 		"""
 		Detect outliers using Cook's distance. Cook's distance is defined as the coefficient vector would move 
@@ -1000,7 +1120,7 @@ class LinearRegressionModelMRI:
 			X = self._stack_ones(X)
 		return(np.dot(X, self.coef_))
 
-	def write_tfce_results(self, contrast_index, data_mask, affine):
+	def write_t_tfce_results(self, contrast_index, data_mask, affine):
 		"""
 		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
 		
@@ -1038,6 +1158,43 @@ class LinearRegressionModelMRI:
 		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.nii.gz")
 		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_, values)
 		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
+
+	def write_mediation_z_tfce_results(self, data_mask, affine):
+		"""
+		Write the Threshold-Free Cluster Enhancement (TFCE) results for the Sobel Z-score.
+
+		This function saves multiple NIfTI images containing the Z-values, TFCE values, and 
+		their respective FWER corrected p-values. The results are saved as NIfTI images with file names
+		indicating the type of analysis (Z-values, TFCE, and TFCE p-values).
+
+		Parameters
+		----------
+		data_mask : numpy.ndarray
+			A binary mask indicating valid data points in the brain image. The mask is used to 
+			ensure that only the valid regions of the image are considered for saving the results.
+		
+		affine : numpy.ndarray
+			The affine transformation matrix for the NIfTI images, which is necessary for the 
+			proper spatial alignment of the data when writing to NIfTI format.
+
+		Raises
+		------
+		AssertionError
+			If the required TFCE permutations have not been computed before calling this method.
+		
+		Notes
+		-----
+		This function assumes that the permutation-based TFCE analysis has been run, and the
+		resulting data is available in `mediation_z_tfce_max_permutations_` and `mediation_z_tfce_`.
+		The function also calls `write_nibabel_image` to save the generated images.
+		"""
+		assert hasattr(self, 'mediation_z_tfce_max_permutations_'), "Run permute_mediation_z_tfce first"
+		contrast_name = "mediation_z"
+		self.write_nibabel_image(values = self.mediation_z_, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
+		self.write_nibabel_image(values = self.mediation_z_tfce_, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce.nii.gz")
+		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_,self.mediation_z_tfce_)
+		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce-1minusp.nii.gz")
+
 
 	def write_nibabel_image(self, values, data_mask, affine, outname):
 		"""
