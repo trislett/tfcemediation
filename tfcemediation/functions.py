@@ -1026,10 +1026,9 @@ class LinearRegressionModelMRI:
 		# Garbage collections
 		del stat_TFCE, stat, perm_calcTFCE, tmp_z
 		gc.collect()
-
 		return(max_tfce)
 
-	def permute_mediation_z_tfce(self, n_permutations, whiten = True):
+	def permute_mediation_z_tfce(self, n_permutations):
 		"""
 		Perform TFCE-based permutation testing for a given contrast index.
 
@@ -1060,7 +1059,7 @@ class LinearRegressionModelMRI:
 																				E = self.tfce_E_,
 																				adjacency_set = self.adjacency_set_,
 																				seed = seeds[i]) for i in tqdm(range(n_permutations)))
-		self.mediation_z_tfce_max_permutations_ = tfce_maximum_values
+		self.mediation_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
 
 	def outlier_detection(self, f_quantile = 0.99, cooks_distance_threshold = None, low_ram = True):
 		"""
