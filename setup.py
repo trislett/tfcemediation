@@ -26,11 +26,11 @@ extensions = [
         language="c++",  # Use C++ for compilation
         include_dirs=[
             numpy.get_include(),  # NumPy headers
-            "lib"  # Path to the 'lib/geodesic' folder
+            "libs"  # Path to the 'lib/geodesic' folder
         ],
         extra_compile_args=["-std=c++11"],  # Enable C++11 standard
         libraries=[],  # Specify additional libraries if needed
-        library_dirs=['lib/'],  # Specify library directories if needed
+        library_dirs=['libs/'],  # Specify library directories if needed
     ),
     # Second extension: tfce
     Extension(
@@ -39,7 +39,7 @@ extensions = [
         language="c++",  # Use C++ for compilation
         include_dirs=[
             numpy.get_include(),  # NumPy headers
-            "lib"  # Path to the 'lib/geodesic' folder
+            "libs"  # Path to the 'lib/geodesic' folder
         ],
         extra_compile_args=["-std=c++11"],  # Enable C++11 standard
         libraries=[],  # Specify additional libraries if needed
@@ -56,7 +56,7 @@ extensions = [
 exec(open('tfcemediation/version.py').read())
 setup(name = PACKAGE_NAME, version = __version__,
   maintainer = "Tristram Lett",
-  maintainer_email = "tristram.lett@charite.de",
+  maintainer_email = "tris.lett@gmail.com",
   description = "TFCE_mediation",
   long_description = "Fast regression and mediation analysis of vertex or voxel MRI data with TFCE",
   url = "https://github.com/trislett/TFCE_mediation",
