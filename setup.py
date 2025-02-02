@@ -28,7 +28,7 @@ extensions = [
             numpy.get_include(),  # NumPy headers
             "libs"  # Path to the 'lib/geodesic' folder
         ],
-        extra_compile_args=["-std=c++11"],  # Enable C++11 standard
+        extra_compile_args=["-std=c++17"],  # Enable C++11 standard
         libraries=[],  # Specify additional libraries if needed
         library_dirs=['libs/'],  # Specify library directories if needed
     ),
@@ -41,7 +41,7 @@ extensions = [
             numpy.get_include(),  # NumPy headers
             "libs"  # Path to the 'lib/geodesic' folder
         ],
-        extra_compile_args=["-std=c++11"],  # Enable C++11 standard
+        extra_compile_args=["-std=c++17"],  # Enable C++11 standard
         libraries=[],  # Specify additional libraries if needed
         library_dirs=[],  # Specify library directories if needed
     ),

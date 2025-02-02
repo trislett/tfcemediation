@@ -6,90 +6,90 @@
 #include <vector>
 #include <algorithm>
 
-//    Fast TFCE algorithm
-//    Copyright (C) 2025  Tristram Lett
-
-//#    This program is free software: you can redistribute it and/or modify
-//#    it under the terms of the GNU General Public License as published by
-//#    the Free Software Foundation, either version 3 of the License, or
-//#    (at your option) any later version.
-
-//#    This program is distributed in the hope that it will be useful,
-//#    but WITHOUT ANY WARRANTY; without even the implied warranty of
-//#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-//#    GNU General Public License for more details.
-
-//#    You should have received a copy of the GNU General Public License
-//#    along with this program.  If not, see <http:www.gnu.org/licenses/>.
-
 using namespace std;
 
-template <typename RealType>
+template <class RealType>
 void tfce(float H, float E, float minT, float deltaT, 
-          const std::vector<std::vector<int>> &adjacencyList,
+          const vector< vector<int> > & adjacencyList,
           const RealType * __restrict__ image,
           RealType * __restrict__ enhn) {
 
-    int numberOfVertices = adjacencyList.size();
+  int numberOfVertices = adjacencyList.size();
 
-    // Use unique_ptr to automatically handle memory cleanup
-    std::vector<std::unique_ptr<std::list<int>>> disjointFind(numberOfVertices);
-    std::unordered_set<std::list<int>*> disjointSets;
+  vector< list<int>* > disjointFind(numberOfVertices);
+  set< list<int>* > disjointSets;
 
-    std::vector<int> imageI(numberOfVertices);
-    for (int i = 0; i < numberOfVertices; ++i) {
-        imageI[i] = i;
-    }
+  int * __restrict__ imageI = new int[numberOfVertices]; 
+  for (int i = 0; i != numberOfVertices; ++i) {
+    imageI[i] = i;
+  }
 
-    // Sort indices by image intensity in descending order
-    std::sort(imageI.begin(), imageI.end(), 
-              [&image](int i, int j) { return image[i] > image[j]; });
+  sort(imageI, imageI + numberOfVertices,
+        [&image](int i, int j) {
+          return image[i] > image[j];
+        });
 
-    RealType maxT = image[imageI[0]];
-    if (deltaT == 0) {
-        deltaT = maxT / 100;
-    }
+  RealType maxT = image[imageI[0]];
 
-    int j = 0;
-    for (float T = maxT; T >= minT; T -= deltaT) {
-        // Incremental connectivity using a disjoint-set approach
-        while (j < numberOfVertices && image[imageI[j]] > T) {
-            int v = imageI[j];
-            disjointFind[v] = std::make_unique<std::list<int>>();
-            disjointFind[v]->push_front(v);
+  if (deltaT == 0) {
+    deltaT = maxT / 100;
+  }
 
-            disjointSets.insert(disjointFind[v].get());
+  int j = 0;
+  for (float T = maxT; T >= minT; T -= deltaT) { // descending -> incremental connectivity
 
-            for (int neighbor : adjacencyList[v]) {
-                if (disjointFind[neighbor] && disjointFind[neighbor] != disjointFind[v]) {
-                    std::list<int>* neighborSet = disjointFind[neighbor].get();
-                    std::list<int>* currentSet = disjointFind[v].get();
+    while (j < numberOfVertices && image[ imageI[j] ] > T) { // disjoint set algorithm
+      disjointFind[ imageI[j] ] = new list<int>(); // make set
+      disjointFind[ imageI[j] ]-> push_front(imageI[j]); 
 
-                    // Move elements from current set to neighbor set
-                    neighborSet->splice(neighborSet->begin(), *currentSet);
+      disjointSets.insert(disjointFind[ imageI[j] ]);
 
-                    // Update disjointFind to reflect new ownership
-                    for (int element : *neighborSet) {
-                        disjointFind[element] = std::move(disjointFind[v]);
-                    }
+      for (int i = 0; i < adjacencyList[imageI[j]].size(); ++i) {
+        int a = adjacencyList[ imageI[j] ][i];
+        list<int>* c = disjointFind[ imageI[j] ];
 
-                    disjointSets.erase(currentSet);
-                }
-            }
-            ++j;
+        if (disjointFind[a] && disjointFind[a] != c) {
+          for (list<int>::const_iterator iterator = c->begin(); 
+               iterator != c->end(); 
+               ++iterator) {
+
+            disjointFind[ *iterator ] = disjointFind[a]; // optimize this
+          }
+
+          disjointFind[a]->splice(disjointFind[a]->begin(), *c);
+  
+          disjointSets.erase(c);
+          delete c; // free
         }
 
-        float HH = std::pow(T, H);
+      }
 
-        // Apply TFCE increment
-        for (auto* component : disjointSets) {
-            float tfceIncrement = std::pow(component->size(), E) * HH;
-            for (int idx : *component) {
-                enhn[idx] += tfceIncrement;
-            }
-        }
+      ++j;
     }
 
-    // Unique pointers automatically free memory, no manual delete needed
+    float HH = pow(T, H);
+
+    for (set< list<int>* >::const_iterator iterator = disjointSets.begin(); 
+         iterator != disjointSets.end(); 
+         ++iterator) {
+      list<int>* c = *iterator;
+
+      float tfceIncrement = pow(c->size(), E) * HH; 
+
+      for (list<int>::const_iterator iterator_ = c->begin(); 
+           iterator_ != c->end(); 
+           ++iterator_) {
+        enhn[ *iterator_ ] += tfceIncrement; 
+      }
+    }
+  }
+
+  delete [] imageI;
+
+  for (set< list<int>* >::const_iterator iterator = disjointSets.begin(); 
+         iterator != disjointSets.end(); 
+         ++iterator) {
+    delete *iterator;
+  }
+  // delete [] disjointSets;
 }
-

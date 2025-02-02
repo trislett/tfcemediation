@@ -17,6 +17,7 @@ from tqdm import tqdm
 from joblib import Parallel, delayed, wrap_non_picklable_objects, dump, load
 from statsmodels.stats.multitest import fdrcorrection
 from scipy.stats import t as tdist, f as fdist
+from scipy.stats import norm
 from tfcemediation.tfce import CreateAdjSet
 from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
 from patsy import dmatrix
@@ -393,7 +394,7 @@ class LinearRegressionModelMRI:
 	"""
 	Linear Regression Model
 	"""
-	def __init__(self, *, fit_intercept = True, n_jobs = 16, memory_mapping = False, use_tmp = True, fdr_correction = False, image_mask = None):
+	def __init__(self, *, fit_intercept = True, n_jobs = 16, memory_mapping = False, use_tmp = True, fdr_correction = False):
 		"""
 		Initialize the LinearRegressionModel instance.
 
@@ -418,7 +419,6 @@ class LinearRegressionModelMRI:
 		self.use_tmp_ = use_tmp
 		self.tmp_directory_ = os.environ.get("TMPDIR", "/tmp/")
 		self.fdr_correction_ = fdr_correction
-		self.image_mask = image_mask
 
 	def _check_inputs(self, X, y):
 		"""
@@ -629,7 +629,117 @@ class LinearRegressionModelMRI:
 		self.coef_ = a
 		self.leverage_ = leverage
 		return(self)
-	
+
+	def _calculate_beta_se(self, exog, endog, index_var = -1):
+		"""
+		Calculate the standard error for the coefficients using linear regression.
+		Parameters
+		----------
+		exog : np.ndarray, shape (n_samples, n_features)
+			Exogenous variables (independent variables).
+		endog : np.ndarray, shape (n_samples, n_dependent_variables)
+			Endogenous variables (dependent variables).
+		index_var : int, optional, default -1
+			Index of the variable for which standard error is calculated.
+
+		Returns
+		-------
+		tuple
+			A tuple of (coefficient, standard error) for the specified variable.
+		"""
+
+		n = endog.shape[0]
+		k = exog.shape[1]
+		a = cy_lin_lstsqr_mat(exog, endog)
+		sigma2 = np.sum((endog - np.dot(exog,a))**2,axis=0) / (n - k)
+		invXX = np.linalg.inv(np.dot(exog.T, exog))
+		se = fast_se_of_slope(invXX, sigma2)
+		return(a[index_var], se[index_var])
+	def _calculate_sobel(self, exogA, endogA, exogB, endogB):
+		"""
+		Calculate the Sobel z-score for mediation analysis.
+
+		Parameters
+		----------
+		exogA : np.ndarray, shape (n_samples, n_features)
+			Exogenous variables for the first stage.
+		endogA : np.ndarray, shape (n_samples,)
+			Endogenous variable for the first stage.
+		exogB : np.ndarray, shape (n_samples, n_features)
+			Exogenous variables for the second stage.
+		endogB : np.ndarray, shape (n_samples,)
+			Endogenous variable for the second stage.
+
+		Returns
+		-------
+		float
+			Sobel z-score for the mediation analysis.
+		"""
+		beta_a, se_a = self._calculate_beta_se(exogA, endogA, index_var = -1)
+		beta_b, se_b = self._calculate_beta_se(exogB, endogB, index_var = -1)
+		sobel_z = beta_a*beta_b / np.sqrt((beta_b**2 * se_a**2) + (beta_a**2 * se_b**2))
+		return(sobel_z)
+
+	def mediation_sobelz_from_formula(self, mri_data, X = None, M = None, y = None, covariates = None, calculate_probability = True):
+		"""
+		Perform Sobel mediation analysis using the provided formulas.
+
+		Parameters
+		----------
+		mri_data : np.ndarray, shape (n_samples,)
+			MRI data.
+		X : np.ndarray, shape (n_samples, n_features), optional
+			Exogenous variable for the first stage in the mediation model.
+		M : np.ndarray, shape (n_samples, n_features), optional
+			Mediating variable in the model.
+		y : np.ndarray, shape (n_samples, n_features), optional
+			Endogenous variable (dependent variable) for the second stage.
+		covariates : np.ndarray, shape (n_samples, n_covariates), optional
+			Covariates to include in the model.
+		calculate_probability : bool, default=True
+			Whether to calculate the p-values for the z-statistics.
+		
+		Returns
+		-------
+		self : object
+			Fitted model with mediation z-scores and p-values.
+		"""
+		assert hasattr(self, 'df_'), "Pandas dataframe is missing (self.df_) run load_pandas_dataframe or load_csv_dataframe first"
+		not_none_count = sum(val is not None for val in (X, M, y))
+		assert not_none_count == 2, "Two of X, M, and y must not be None"
+		if X is not None:
+			varA = self.dummy_code_from_formula(X)
+			assert varA.shape[1]==1, "Currently only 1d variables are supported"
+			if covariates is not None:
+				exogA = self._stack_ones(np.column_stack((self.dummy_code_from_formula(covariates), varA)))
+			else:
+				exogA = self._stack_ones(varA)
+			if y is not None:
+				exogB = np.column_stack((exogA, self.dummy_code_from_formula(y)))
+				endogA = mri_data
+				endogB = self.dummy_code_from_formula(y)
+			if M is not None:
+				exogB = np.column_stack((exogA, self.dummy_code_from_formula(M)))
+				endogA = self.dummy_code_from_formula(M)
+				endogB = mri_data
+		else:
+			varA = self.dummy_code_from_formula(M)
+			if covariates is not None:
+				exogA = self._stack_ones(np.column_stack((self.dummy_code_from_formula(covariates), varA)))
+			else:
+				exogA = self._stack_ones(varA)
+			assert varA.shape[1]==1, "Currently only 1d variables are supported"
+			exogB = np.column_stack((exogA, self.dummy_code_from_formula(y)))
+			endogA = mri_data
+			endogB = mri_data
+		self.mediation_z_ = self._calculate_sobel(exogA, endogA, exogB, endogB)
+		if calculate_probability:
+			self.mediation_z_pvalues_ = 2 * norm.sf(abs(self.mediation_z_))
+		self.mediation_exogA_ = exogA
+		self.mediation_exogB_ = exogB
+		self.mediation_endogA_ = endogA
+		self.mediation_endogB_ = endogB
+
 	def calculate_tstatistics(self, calculate_probability = False):
 		"""
 		Calculate t-statistics for the model coefficients.
