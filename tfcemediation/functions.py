@@ -24,6 +24,21 @@ from patsy import dmatrix
 from scipy.ndimage import label as scipy_label
 from scipy.ndimage import generate_binary_structure
 
+# get static resources
+scriptwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+static_directory = os.path.join(scriptwd, "tfce_mediation_slim", "static")
+static_files = os.listdir(static_directory)
+
+pack_directory = os.path.join(scriptwd, "tfce_mediation_slim", "static", "aseg-subcortical-Surf")
+aseg_subcortical_files = np.sort(os.listdir(pack_directory))
+pack_directory = os.path.join(scriptwd, "tfce_mediation_slim", "static", "JHU-ICBM-Surf")
+jhu_white_matter_files = np.sort(os.listdir(pack_directory))
+
+def get_precompiled_freesurfer_adjacency(spatial_smoothing = 3):
+	adjacency_lh = np.load('%s/lh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
+	adjacency_rh = np.load('%s/rh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
+	return(adjacency_lh, adjacency_rh)
+
 def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	"""
 	Generates a list of random integer seeds.
