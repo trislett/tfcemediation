@@ -26,18 +26,13 @@ from scipy.ndimage import generate_binary_structure
 
 # get static resources
 scriptwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-static_directory = os.path.join(scriptwd, "tfce_mediation_slim", "static")
+static_directory = os.path.join(scriptwd, "tfcemediation", "static")
 static_files = os.listdir(static_directory)
 
-pack_directory = os.path.join(scriptwd, "tfce_mediation_slim", "static", "aseg-subcortical-Surf")
+pack_directory = os.path.join(scriptwd, "tfcemediation", "static", "aseg-subcortical-Surf")
 aseg_subcortical_files = np.sort(os.listdir(pack_directory))
-pack_directory = os.path.join(scriptwd, "tfce_mediation_slim", "static", "JHU-ICBM-Surf")
+pack_directory = os.path.join(scriptwd, "tfcemediation", "static", "JHU-ICBM-Surf")
 jhu_white_matter_files = np.sort(os.listdir(pack_directory))
-
-def get_precompiled_freesurfer_adjacency(spatial_smoothing = 3):
-	adjacency_lh = np.load('%s/lh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
-	adjacency_rh = np.load('%s/rh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
-	return(adjacency_lh, adjacency_rh)
 
 def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	"""
@@ -172,14 +167,153 @@ def scale_arr(arr, centre = True, scale = True, div_sqrt_nvar = False, axis = 0)
 		x = np.divide(x, np.sqrt(x.shape[1]))
 	return(x)
 
-#class SurfaceImage:
-#	def __init__(self, *, surfaces_lh = None, surfaces_rh = None, adjacency_lh = None, adjacency_rh = None, tmp_dir = None):
-#		self.surfaces_lh_ = surfaces_lh
-#		self.surfaces_rh_ = surfaces_rh
-#		if adjacency_lh is None:
-#			
-#		adjacency_lh
-#		adjacency_rh
+def get_precompiled_freesurfer_adjacency(spatial_smoothing = 3):
+	"""
+	Loads precomputed adjacency matrices from the midthickness FreeSurfer surface for left and right hemispheres.
+	
+	Parameters
+	----------
+	spatial_smoothing : int, optional
+		The amount of spatial smoothing applied (default is 3).
+	
+	Returns
+	-------
+	tuple of np.ndarray
+		adjacency_lh : numpy array
+			Adjacency matrix for the left hemisphere.
+		adjacency_rh : numpy array
+			Adjacency matrix for the right hemisphere.
+	"""
+	adjacency_lh = np.load('%s/lh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
+	adjacency_rh = np.load('%s/rh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
+	return(adjacency_lh, adjacency_rh)
+
+def convert_fslabel(name_fslabel):
+	"""
+	Reads and parses a FreeSurfer label file.
+	
+	Parameters
+	----------
+	name_fslabel : str
+		Path to the FreeSurfer label file.
+	
+	Returns
+	-------
+	tuple of np.ndarray
+		v_id : numpy array
+			Vertex indices.
+		v_ras : numpy array
+			Vertex coordinates (RAS - Right, Anterior, Superior).
+		v_value : numpy array
+			Associated scalar values for each vertex.
+	
+	Raises
+	------
+	ValueError
+		If the file header is incorrectly formatted.
+	"""
+	obj = open(name_fslabel)
+	reader = obj.readline().strip().split()
+	reader = np.array(obj.readline().strip().split())
+	if reader.ndim == 1:
+		num_vertex = reader[0].astype(int)
+	else:
+		print('Error reading header')
+	v_id = np.zeros((num_vertex)).astype(int)
+	v_ras = np.zeros((num_vertex,3)).astype(np.float32)
+	v_value = np.zeros((num_vertex)).astype(np.float32)
+	for i in range(num_vertex):
+		reader = obj.readline().strip().split()
+		v_id[i] = np.array(reader[0]).astype(int)
+		v_ras[i] = np.array(reader[1:4]).astype(np.float32)
+		v_value[i] = np.array(reader[4]).astype(np.float32)
+	return (v_id, v_ras, v_value)
+
+class CorticalSurfaceImage:
+	"""
+	Represents a cortical surface image,masking them by non-zero data, and calculatign their adjacency for statistical analyses from FreeSurfer files. 
+	It is possible to save and load the data classes as *.pkl objects. The masking and conversion to np.float32 substantially reduces the
+	file size and RAM requirements in large datasets.
+	"""
+	def __init__(self, *, surfaces_lh_path = None, surfaces_rh_path = None, adjacency_lh_path = None, adjacency_rh_path = None):
+		"""
+		Initializes the CorticalSurfaceImage instance by loading and processing cortical surface data.
+		
+		Parameters
+		----------
+		surfaces_lh_path : str, optional
+			Path to the left hemisphere surface file.
+		surfaces_rh_path : str, optional
+			Path to the right hemisphere surface file.
+		adjacency_lh_path : str, optional
+			If None, then the precomputed left hemisphere adjacency matrix at 3mm geodesic distance.
+		adjacency_rh_path : str, optional
+			If None, then the precomputed right hemisphere adjacency matrix at 3mm geodesic distance.
+		"""
+		surface_lh = nib.freesurfer.mghformat.load(surfaces_lh_path)
+		data_lh = surface_lh.get_fdata()[:,0,0,:]
+		n_vertices_lh, n_subjects = data_lh.shape
+		affine_lh = surface_lh.affine
+		header_lh = surface_lh.header
+		mask_index_lh = convert_fslabel('%s/lh.cortex.label' % static_directory)[0]
+		data_lh = data_lh[mask_index_lh].astype(np.float32, order = "C")
+		surface_rh = nib.freesurfer.mghformat.load(surfaces_rh_path)
+		data_rh = surface_rh.get_fdata()[:,0,0,:]
+		n_vertices_rh, _ = data_rh.shape
+		affine_rh = surface_rh.affine
+		header_rh = surface_rh.header
+		mask_index_rh = convert_fslabel('%s/rh.cortex.label' % static_directory)[0]
+		data_rh = data_rh[mask_index_rh].astype(np.float32, order = "C")
+		if adjacency_lh_path is None and adjacency_rh_path is None:
+			adjacency = get_precompiled_freesurfer_adjacency(spatial_smoothing = 3)
+		self.image_data_ = np.concatenate([data_lh, data_rh]).astype(np.float32, order = "C")
+		self.affine_ = [affine_lh, affine_rh]
+		self.header_ = [header_lh, header_rh]
+		self.n_vertices_ = [n_vertices_lh, n_vertices_rh]
+		mask_lh = np.zeros(self.n_vertices_[0], int)
+		mask_lh[mask_index_lh] = 1
+		mask_rh = np.zeros(self.n_vertices_[1], int)
+		mask_rh[mask_index_rh] = 1
+		self.mask_data_ = [mask_lh, mask_rh]
+		self.adjacency_ = adjacency
+		self.hemipheres_ = ['left-hemisphere', 'right-hemisphere']
+
+	def save(self, filename):
+		"""
+		Saves a VoxelImage instance as a pickle file.
+		
+		Parameters
+		----------
+			filename : str
+				The name of the pickle file to be saved.
+				
+		Raises
+		----------
+			AssertionError: If the filename does not end with .pkl.
+		"""
+		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
+		with open(filename, 'wb') as f:
+			pickle.dump(self, f)
+
+	@classmethod
+	def load(cls, filename):
+		"""
+		Loads a VoxelImage instance from a pickle file.
+		
+		Parameters
+		----------
+			filename (str): The name of the pickle file to load.
+		Returns
+		-------
+			VoxelImage : object
+				The loaded instance.
+		Raises
+		-------
+			AssertionError: If the filename does not end with .pkl.
+		"""
+		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
+		with open(filename, 'rb') as f:
+			return pickle.load(f)
 
 class VoxelImage:
 	"""
@@ -686,45 +820,138 @@ class LinearRegressionModelMRI:
 					self.t_qvalues_[c] = fdrcorrection(self.t_pvalues_[c])[1]
 		return(self)
 
-	def calculate_tstatistics_tfce(self, adjacency_set, H = 2., E = 0.67):
+	def _calculate_surface_tfce(self, mask_data, statistic, adjacency_set, H = 2.0, E = 0.67, return_max_tfce = False):
 		"""
-		Computes TFCE-enhanced t-statistics for both positive and negative contrasts.
+		Computes the TFCE (Threshold-Free Cluster Enhancement) statistic for surface-based data.
 		
-		This function applies the TFCE algorithm to enhance statistical maps using adjacency sets.
-		
+		This function calculates TFCE values separately for left and right hemispheres based on the provided adjacency set. 
+		It supports returning either the full TFCE-enhanced statistic or only the maximum value.
+
 		Parameters
 		----------
+		mask_data : list of numpy arrays
+			Binary masks indicating valid data points for each hemisphere.
+		statistic : numpy array
+			The statistical values corresponding to the data points in the mask.
 		adjacency_set : list
-			A set defining the adjacency relationships between data points.
+			A list containing adjacency information for left and right hemisphere.
 		H : float, optional
 			The height exponent for TFCE computation (default is 2.0).
 		E : float, optional
 			The extent exponent for TFCE computation (default is 0.67).
-		
+		return_max_tfce : bool, optional
+			If True, returns only the maximum TFCE value; otherwise, returns full TFCE statistics (default is False).
+
+		Returns
+		-------
+		tuple of numpy arrays
+			TFCE-enhanced statistics for positive and negative contrasts.
+		"""
+		midpoint = mask_data[0].sum()
+		vertStat_out_lh=np.zeros(mask_data[0].shape[0]).astype(np.float32, order = "C")
+		vertStat_out_rh=np.zeros(mask_data[1].shape[0]).astype(np.float32, order = "C")
+		vertStat_TFCE_lh = np.zeros_like(vertStat_out_lh).astype(np.float32, order = "C")
+		vertStat_TFCE_rh = np.zeros_like(vertStat_out_rh).astype(np.float32, order = "C")
+		vertStat_out_lh[mask_data[0] == 1] = statistic[:midpoint]
+		vertStat_out_rh[mask_data[1] == 1] = statistic[midpoint:]
+		calcTFCE_lh = CreateAdjSet(H, E, adjacency_set[0])
+		calcTFCE_rh = CreateAdjSet(H, E, adjacency_set[1])
+		calcTFCE_lh.run(vertStat_out_lh, vertStat_TFCE_lh)
+		calcTFCE_rh.run(vertStat_out_rh, vertStat_TFCE_rh)
+		if return_max_tfce:
+			out_statistic_positive = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
+		else:
+			out_statistic_positive = np.zeros_like(statistic).astype(np.float32, order = "C")
+			out_statistic_positive[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
+			out_statistic_positive[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
+		vertStat_TFCE_lh = np.zeros_like(vertStat_out_lh).astype(np.float32, order = "C")
+		vertStat_TFCE_rh = np.zeros_like(vertStat_out_rh).astype(np.float32, order = "C")
+		calcTFCE_lh.run(-vertStat_out_lh, vertStat_TFCE_lh)
+		calcTFCE_rh.run(-vertStat_out_rh, vertStat_TFCE_rh)
+		if return_max_tfce:
+			out_statistic_negative = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
+		else:
+			out_statistic_negative = np.zeros_like(statistic).astype(np.float32, order = "C")
+			out_statistic_negative[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
+			out_statistic_negative[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
+		# Garbage collections
+		del mask_data, statistic, adjacency_set, vertStat_out_lh, vertStat_out_rh, calcTFCE_lh, calcTFCE_rh
+		gc.collect()
+		return(out_statistic_positive, out_statistic_negative)
+
+	def calculate_tstatistics_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67):
+		"""
+		Computes Threshold-Free Cluster Enhancement (TFCE) enhanced t-statistics 
+		for both positive and negative contrasts.
+
+		This function applies the TFCE algorithm to enhance statistical maps 
+		by accounting for spatial adjacency relationships, improving sensitivity 
+		in neuroimaging analyses.
+
+		Parameters
+		----------
+		ImageObjectMRI : object
+			An instance containing neuroimaging data, including adjacency 
+			information and mask data.
+		H : float, optional
+			The height exponent for TFCE computation (default is 2.0).
+		E : float, optional
+			The extent exponent for TFCE computation (default is 0.67).
+
 		Raises
 		------
 		AssertionError
 			If the t-statistics have not been computed before running TFCE.
-		"""
+		
+		Returns
+		-------
+		self : object
+			The instance with updated attributes containing the computed 
+			TFCE-enhanced t-statistics for both positive and negative contrasts.
+		
+		Notes
+		-----
+		- If 'ImageObjectMRI' has a 'hemispheres_' attribute, TFCE is computed 
+		  using a surface-based approach.
+		- Otherwise, a voxel-based TFCE computation is performed using adjacency sets.
+		- The computed TFCE values are stored in 'self.t_tfce_positive_' and 
+		  'self.t_tfce_negative_'.
 		assert hasattr(self, 't_'), "Run calculate_tstatistics() first"
-		calcTFCE = CreateAdjSet(H, E, adjacency_set) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
+		adjacency_set = ImageObjectMRI.adjacency_
+		"""
+		assert hasattr(ImageObjectMRI, 'adjacency_'), "ImageObjectMRI is missing adjacency_"
 		self.t_tfce_positive_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
 		self.t_tfce_negative_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
-		for c in range(self.t_.shape[0]):
-			tval = self.t_[c]
-			stat = tval.astype(np.float32, order = "C")
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-			calcTFCE.run(stat, stat_TFCE)
-			self.t_tfce_positive_[c] = stat_TFCE
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-			calcTFCE.run(-stat, stat_TFCE)
-			self.t_tfce_negative_[c] = stat_TFCE
-		self.adjacency_set_ = adjacency_set
+		if hasattr(ImageObjectMRI, 'hemipheres_'):
+			for c in range(self.t_.shape[0]):
+				if np.sum(np.abs(self.t_[c] > 10)) > int(self.t_[c].shape[0] * 0.90):
+					print("Large t-values[Contrast-%d] detected for >90 percent of the vertices. Skipping TFCE calculation for Contrast-%d" % (c,c))
+				else:
+					tfce_values =  self._calculate_surface_tfce(mask_data = ImageObjectMRI.mask_data_,
+																				statistic = self.t_[c].astype(np.float32, order = "C"),
+																				adjacency_set = ImageObjectMRI.adjacency_,
+																				H = H, E = E, return_max_tfce = False)
+					self.t_tfce_positive_[c] = tfce_values[0]
+					self.t_tfce_negative_[c] = tfce_values[1]
+		else:
+			calcTFCE = CreateAdjSet(H, E, ImageObjectMRI.adjacency_) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
+			for c in range(self.t_.shape[0]):
+				tval = self.t_[c]
+				stat = tval.astype(np.float32, order = "C")
+				stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+				calcTFCE.run(stat, stat_TFCE)
+				self.t_tfce_positive_[c] = stat_TFCE
+				stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+				calcTFCE.run(-stat, stat_TFCE)
+				self.t_tfce_negative_[c] = stat_TFCE
+		# for permutation testing
+		self.adjacency_set_ = ImageObjectMRI.adjacency_
+		self.mask_data_ = ImageObjectMRI.mask_data_
 		self.tfce_H_ = float(H)
 		self.tfce_E_ = float(E)
 		return(self)
 
-	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, seed):
+	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, mask_data, seed):
 		"""
 		Runs a single TFCE-based permutation test.
 		
@@ -767,27 +994,34 @@ class LinearRegressionModelMRI:
 		tmp_se = fast_se_of_slope(tmp_invXX, tmp_sigma2)
 		tmp_t = np.divide(a , tmp_se)
 		
-		# Compute TFCE
-		perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
-		tval = tmp_t[contrast_index]
-		stat = tval.astype(np.float32, order = "C")
-		
-		stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-		perm_calcTFCE.run(stat, stat_TFCE)
-		max_pos = stat_TFCE.max()
-		
-		# Garbage collections
-		del stat_TFCE, tmp_invXX, tmp_sigma2, tmp_se, tmp_t
-		gc.collect()
-		
-		stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-		perm_calcTFCE.run(-stat, stat_TFCE)
-		max_neg = stat_TFCE.max()
-		
-		# Garbage collections 2 electric bungalow
-		del stat_TFCE, perm_calcTFCE
-		gc.collect()
-		
+		if len(model.adjacency_set_) == 2
+			tfce_values =  self._calculate_surface_tfce(mask_data = mask_data,
+																		statistic = tmp_t.astype(np.float32, order = "C"),
+																		adjacency_set = adjacency_set,
+																		H = H, E = E, return_max_tfce = True)
+			del a, tmp_invXX, tmp_sigma2, tmp_se, tmp_t
+			gc.collect()
+			max_pos, max_neg = tfce_values
+		else:
+			# Compute TFCE
+			perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+			tval = tmp_t[contrast_index]
+			stat = tval.astype(np.float32, order = "C")
+			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+			perm_calcTFCE.run(stat, stat_TFCE)
+			max_pos = stat_TFCE.max()
+			
+			# Garbage collections
+			del a, stat_TFCE, tmp_invXX, tmp_sigma2, tmp_se, tmp_t
+			gc.collect()
+			
+			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+			perm_calcTFCE.run(-stat, stat_TFCE)
+			max_neg = stat_TFCE.max()
+			
+			# Garbage collections 2 electric bungalow
+			del stat_TFCE, perm_calcTFCE
+			gc.collect()
 		return(max_pos, max_neg)
 
 	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True):
@@ -822,6 +1056,7 @@ class LinearRegressionModelMRI:
 																				H = self.tfce_H_,
 																				E = self.tfce_E_,
 																				adjacency_set = self.adjacency_set_,
+																				mask_data = self.mask_data_,
 																				seed = seeds[i]) for i in tqdm(range(int(n_permutations/2))))
 		tfce_maximum_values = np.concatenate(tfce_maximum_values)
 		self.t_tfce_max_permutations_ = tfce_maximum_values

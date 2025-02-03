@@ -5,7 +5,7 @@ from setuptools import setup, find_packages, Extension
 from Cython.Build import cythonize
 import numpy
 
-PACKAGE_NAME = "tfce_mediation_slim"
+PACKAGE_NAME = "tfcemediation"
 
 BUILD_REQUIRES = ["numpy", "scipy", "matplotlib", "nibabel", "cython", "scikit-learn", "scikit-image", "joblib", "pandas", "tqdm", "statsmodels"]
 
@@ -51,7 +51,7 @@ extensions = [
 ]
 
 exec(open('tfcemediation/version.py').read())
-setup(name = PACKAGE_NAME, version = __version__,
+setup(name = PACKAGE_NAME, version = __version__, include_package_data=True,
   maintainer = "Tristram Lett",
   maintainer_email = "tris.lett@gmail.com",
   description = "TFCE_mediation",
@@ -63,6 +63,7 @@ setup(name = PACKAGE_NAME, version = __version__,
   zip_safe=False,
   install_requires=BUILD_REQUIRES,
   packages=find_packages(),
+  package_data={'tfcemediation': ['static/*', 'static/aseg-subcortical-Surf/*', 'static/JHU-ICBM-Surf/*', 'static/aseg-other-Surf/']},
   ext_modules=cythonize(extensions, language_level="3"),
   python_requires=">=3.7",
 )
