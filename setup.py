@@ -17,38 +17,35 @@ CLASSIFIERS = ["Development Status :: 4 - Beta",
   "Programming Language :: Python",
   "Topic :: Scientific/Engineering :: Medical Science Apps."]
 
-# Define the extension modules
 extensions = [
-    # First extension: adjacency
     Extension(
-        "tfcemediation.adjacency",  # Name of the resulting module
-        ["tfcemediation/adjacency.pyx"],  # Source file
-        language="c++",  # Use C++ for compilation
+        "tfcemediation.adjacency",
+        ["tfcemediation/adjacency.pyx"],
+        language="c++",
         include_dirs=[
-            numpy.get_include(),  # NumPy headers
-            "libs"  # Path to the 'lib/geodesic' folder
+            numpy.get_include(),
+            "libs"
         ],
-        extra_compile_args=["-std=c++17"],  # Enable C++11 standard
-        libraries=[],  # Specify additional libraries if needed
-        library_dirs=['libs/'],  # Specify library directories if needed
-    ),
-    # Second extension: tfce
-    Extension(
-        "tfcemediation.tfce",  # Name of the resulting module
-        ["tfcemediation/tfce.pyx"],  # Source file
-        language="c++",  # Use C++ for compilation
-        include_dirs=[
-            numpy.get_include(),  # NumPy headers
-            "libs"  # Path to the 'lib/geodesic' folder
-        ],
-        extra_compile_args=["-std=c++17"],  # Enable C++11 standard
-        libraries=[],  # Specify additional libraries if needed
-        library_dirs=[],  # Specify library directories if needed
+        extra_compile_args=["-std=c++17"],
+        libraries=[],
+        library_dirs=['libs/'], 
     ),
     Extension(
-        "tfcemediation.cynumstats",  # Module name
-        sources=["tfcemediation/cynumstats.pyx"],  # Cython source
-        include_dirs=[numpy.get_include()],  # Include NumPy headers
+        "tfcemediation.tfce",
+        ["tfcemediation/tfce.pyx"],
+        language="c++",
+        include_dirs=[
+            numpy.get_include(),
+            "libs"
+        ],
+        extra_compile_args=["-std=c++17"],  
+        libraries=[],
+        library_dirs=[],
+    ),
+    Extension(
+        "tfcemediation.cynumstats",
+        sources=["tfcemediation/cynumstats.pyx"],
+        include_dirs=[numpy.get_include()],
         language="c"
     )
 ]
@@ -59,7 +56,7 @@ setup(name = PACKAGE_NAME, version = __version__,
   maintainer_email = "tris.lett@gmail.com",
   description = "TFCE_mediation",
   long_description = "Fast regression and mediation analysis of vertex or voxel MRI data with TFCE",
-  url = "https://github.com/trislett/TFCE_mediation",
+  url = "https://github.com/trislett/tfce_mediation_slim",
   download_url = "",
   platforms=["Linux", "Solaris", "Mac OS-X", "Unix"],
   license = "GNU General Public License v3 or later (GPLv3+)",

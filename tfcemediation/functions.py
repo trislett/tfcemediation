@@ -157,6 +157,14 @@ def scale_arr(arr, centre = True, scale = True, div_sqrt_nvar = False, axis = 0)
 		x = np.divide(x, np.sqrt(x.shape[1]))
 	return(x)
 
+#class SurfaceImage:
+#	def __init__(self, *, surfaces_lh = None, surfaces_rh = None, adjacency_lh = None, adjacency_rh = None, tmp_dir = None):
+#		self.surfaces_lh_ = surfaces_lh
+#		self.surfaces_rh_ = surfaces_rh
+#		if adjacency_lh is None:
+#			
+#		adjacency_lh
+#		adjacency_rh
 
 class VoxelImage:
 	"""
