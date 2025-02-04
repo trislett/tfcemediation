@@ -14,7 +14,8 @@ import numpy as np
 import pandas as pd
 
 from tqdm import tqdm
-from joblib import Parallel, delayed, wrap_non_picklable_objects, dump, load
+from joblib import Parallel, delayed, wrap_non_picklable_objects, dump
+from joblib import load as jload
 from statsmodels.stats.multitest import fdrcorrection
 from scipy.stats import t as tdist, f as fdist
 from scipy.stats import norm
@@ -754,7 +755,7 @@ class LinearRegressionModelMRI:
 		if isinstance(y, str):
 			if y == 'mapped':
 				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
-				y = load(self.memmap_y_name_, mmap_mode='r')
+				y = jload(self.memmap_y_name_, mmap_mode='r')
 		X, y = self._check_inputs(X, y)
 		if not hasattr(self, 'memmap_y_name_'): # confusing: checks for memory mapped y, 
 			if self.memory_mapping_:
@@ -765,7 +766,7 @@ class LinearRegressionModelMRI:
 					data_filename_memmap = os.path.abspath(data_filename_memmap)
 				self.memmap_y_name_ = data_filename_memmap
 				dump(y, data_filename_memmap)
-				y = load(data_filename_memmap, mmap_mode='r')
+				y = jload(data_filename_memmap, mmap_mode='r')
 		if self.fit_intercept_:
 			if np.mean(X[:,0]) != 1:
 				X = self._stack_ones(X)
@@ -848,34 +849,47 @@ class LinearRegressionModelMRI:
 			TFCE-enhanced statistics for positive and negative contrasts.
 		"""
 		midpoint = mask_data[0].sum()
-		vertStat_out_lh=np.zeros(mask_data[0].shape[0]).astype(np.float32, order = "C")
-		vertStat_out_rh=np.zeros(mask_data[1].shape[0]).astype(np.float32, order = "C")
+		
+		vertStat_out_lh = np.zeros(mask_data[0].shape[0], dtype=np.float32, order="C")
+		vertStat_out_rh = np.zeros(mask_data[1].shape[0], dtype=np.float32, order="C")
 		vertStat_TFCE_lh = np.zeros_like(vertStat_out_lh).astype(np.float32, order = "C")
 		vertStat_TFCE_rh = np.zeros_like(vertStat_out_rh).astype(np.float32, order = "C")
+
 		vertStat_out_lh[mask_data[0] == 1] = statistic[:midpoint]
 		vertStat_out_rh[mask_data[1] == 1] = statistic[midpoint:]
+
 		calcTFCE_lh = CreateAdjSet(H, E, adjacency_set[0])
 		calcTFCE_rh = CreateAdjSet(H, E, adjacency_set[1])
 		calcTFCE_lh.run(vertStat_out_lh, vertStat_TFCE_lh)
 		calcTFCE_rh.run(vertStat_out_rh, vertStat_TFCE_rh)
+
 		if return_max_tfce:
 			out_statistic_positive = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
 		else:
 			out_statistic_positive = np.zeros_like(statistic).astype(np.float32, order = "C")
 			out_statistic_positive[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
 			out_statistic_positive[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
-		vertStat_TFCE_lh = np.zeros_like(vertStat_out_lh).astype(np.float32, order = "C")
-		vertStat_TFCE_rh = np.zeros_like(vertStat_out_rh).astype(np.float32, order = "C")
+
+		vertStat_TFCE_lh.fill(0)
+		vertStat_TFCE_rh.fill(0)
+
 		calcTFCE_lh.run(-vertStat_out_lh, vertStat_TFCE_lh)
 		calcTFCE_rh.run(-vertStat_out_rh, vertStat_TFCE_rh)
+
 		if return_max_tfce:
 			out_statistic_negative = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
 		else:
 			out_statistic_negative = np.zeros_like(statistic).astype(np.float32, order = "C")
 			out_statistic_negative[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
 			out_statistic_negative[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
-		# Garbage collections
-		del mask_data, statistic, adjacency_set, vertStat_out_lh, vertStat_out_rh, calcTFCE_lh, calcTFCE_rh
+		adjacency_set = None
+		vertStat_out_lh = None
+		vertStat_out_rh = None
+		vertStat_TFCE_lh = None
+		vertStat_TFCE_rh = None
+		calcTFCE_lh = None
+		calcTFCE_rh = None
+		del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
 		gc.collect()
 		return(out_statistic_positive, out_statistic_negative)
 
@@ -993,38 +1007,45 @@ class LinearRegressionModelMRI:
 		tmp_sigma2 = np.divide(np.sum((y - np.dot(tmp_X, a))**2, axis=0), (n - k))
 		tmp_se = fast_se_of_slope(tmp_invXX, tmp_sigma2)
 		tmp_t = np.divide(a , tmp_se)
+		stat = tmp_t[contrast_index].astype(np.float32, order = "C")
 		
-		if len(model.adjacency_set_) == 2
+		# Unlink variable from memory
+		a = None
+		tmp_X = None
+		tmp_invXX = None
+		tmp_sigma2 = None
+		tmp_se = None
+		tmp_t = None
+		del a, tmp_X, tmp_invXX, tmp_sigma2, tmp_se, tmp_t # this is probably redundant, but won't hurt...
+		
+		if len(adjacency_set) == 2:
 			tfce_values =  self._calculate_surface_tfce(mask_data = mask_data,
-																		statistic = tmp_t.astype(np.float32, order = "C"),
+																		statistic = stat,
 																		adjacency_set = adjacency_set,
 																		H = H, E = E, return_max_tfce = True)
-			del a, tmp_invXX, tmp_sigma2, tmp_se, tmp_t
-			gc.collect()
 			max_pos, max_neg = tfce_values
 		else:
 			# Compute TFCE
 			perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
-			tval = tmp_t[contrast_index]
-			stat = tval.astype(np.float32, order = "C")
 			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
 			perm_calcTFCE.run(stat, stat_TFCE)
 			max_pos = stat_TFCE.max()
-			
-			# Garbage collections
-			del a, stat_TFCE, tmp_invXX, tmp_sigma2, tmp_se, tmp_t
-			gc.collect()
-			
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+			# Compute TFCE for negative statistics
+			stat_TFCE.fill(0)
 			perm_calcTFCE.run(-stat, stat_TFCE)
 			max_neg = stat_TFCE.max()
-			
-			# Garbage collections 2 electric bungalow
-			del stat_TFCE, perm_calcTFCE
-			gc.collect()
+			perm_calcTFCE = None
+			stat_TFCE = None
+		X = None
+		y = None
+		stat = None
+		adjacency_set = None
+		mask_data = None
+		del adjacency_set, stat, mask_data, X, y
+		gc.collect()
 		return(max_pos, max_neg)
 
-	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True):
+	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, use_blocks = True, block_size = 200):
 		"""
 		Performs TFCE-based permutation testing for a given contrast index.
 		
@@ -1041,24 +1062,50 @@ class LinearRegressionModelMRI:
 			Whether to whiten the residuals before permutation (default is True).
 		"""
 		assert hasattr(self, 'adjacency_set_'), "Run calculate_tstatistics_tfce first"
-		if whiten:
-			y = self.y_ - self.predict(self.X_)
+		if self.memory_mapping_:
+			assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
+			y = jload(self.memmap_y_name_, mmap_mode='r')
 		else:
-			y = self.y_.copy()
-		X = self.X_.copy()
+			y = self.y_
+		if whiten:
+			y = y - self.predict(self.X_)
+		X = self.X_
 		print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
 		seeds = generate_seeds(n_seeds = int(n_permutations/2))
-		tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-												delayed(self._run_tfce_t_permutation)(i = i, 
-																				X = X,
-																				y = y, 
-																				contrast_index = contrast_index,
-																				H = self.tfce_H_,
-																				E = self.tfce_E_,
-																				adjacency_set = self.adjacency_set_,
-																				mask_data = self.mask_data_,
-																				seed = seeds[i]) for i in tqdm(range(int(n_permutations/2))))
-		tfce_maximum_values = np.concatenate(tfce_maximum_values)
+		
+		if use_blocks:
+			tfce_maximum_values = []
+			if not n_permutations % block_size == 0:
+				res = n_permutations % block_size
+				n_permutations += (block_size - res)
+			n_blocks = int(n_permutations/block_size)
+			for b in range(n_blocks):
+				print("Block[%d/%d]: %d Permutations" % (int(b+1), n_blocks, block_size))
+				seeds = generate_seeds(n_seeds = int(block_size/2))
+				block_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
+														delayed(self._run_tfce_t_permutation)(i = i, 
+																						X = X,
+																						y = y, 
+																						contrast_index = contrast_index,
+																						H = self.tfce_H_,
+																						E = self.tfce_E_,
+																						adjacency_set = self.adjacency_set_,
+																						mask_data = self.mask_data_,
+																						seed = seeds[i]) for i in tqdm(range(int(block_size/2))))
+				tfce_maximum_values.append(block_tfce_maximum_values)
+			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
+		else:
+			tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
+													delayed(self._run_tfce_t_permutation)(i = i, 
+																					X = X,
+																					y = y, 
+																					contrast_index = contrast_index,
+																					H = self.tfce_H_,
+																					E = self.tfce_E_,
+																					adjacency_set = self.adjacency_set_,
+																					mask_data = self.mask_data_,
+																					seed = seeds[i]) for i in tqdm(range(int(n_permutations/2))))
+			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
 		self.t_tfce_max_permutations_ = tfce_maximum_values
 
 	def calculate_fstatistics(self, calculate_probability = True):
