@@ -257,25 +257,31 @@ class CorticalSurfaceImage:
 		affine_lh = surface_lh.affine
 		header_lh = surface_lh.header
 		mask_index_lh = convert_fslabel('%s/lh.cortex.label' % static_directory)[0]
-		data_lh = data_lh[mask_index_lh].astype(np.float32, order = "C")
+		
+		bin_mask_lh = np.zeros_like(data_lh.mean(1))
+		bin_mask_lh[mask_index_lh]=1
+		bin_mask_lh = bin_mask_lh.astype(int)
+		
+		data_lh = data_lh[bin_mask_lh == 1].astype(np.float32, order = "C")
 		surface_rh = nib.freesurfer.mghformat.load(surfaces_rh_path)
 		data_rh = surface_rh.get_fdata()[:,0,0,:]
 		n_vertices_rh, _ = data_rh.shape
 		affine_rh = surface_rh.affine
 		header_rh = surface_rh.header
 		mask_index_rh = convert_fslabel('%s/rh.cortex.label' % static_directory)[0]
-		data_rh = data_rh[mask_index_rh].astype(np.float32, order = "C")
+		
+		bin_mask_rh = np.zeros_like(data_rh.mean(1))
+		bin_mask_rh[mask_index_rh]=1
+		bin_mask_rh = bin_mask_rh.astype(int)
+		
+		data_rh = data_rh[bin_mask_rh == 1].astype(np.float32, order = "C")
 		if adjacency_lh_path is None and adjacency_rh_path is None:
 			adjacency = get_precompiled_freesurfer_adjacency(spatial_smoothing = 3)
 		self.image_data_ = np.concatenate([data_lh, data_rh]).astype(np.float32, order = "C")
 		self.affine_ = [affine_lh, affine_rh]
 		self.header_ = [header_lh, header_rh]
 		self.n_vertices_ = [n_vertices_lh, n_vertices_rh]
-		mask_lh = np.zeros(self.n_vertices_[0], int)
-		mask_lh[mask_index_lh] = 1
-		mask_rh = np.zeros(self.n_vertices_[1], int)
-		mask_rh[mask_index_rh] = 1
-		self.mask_data_ = [mask_lh, mask_rh]
+		self.mask_data_ = [bin_mask_lh, bin_mask_rh]
 		self.adjacency_ = adjacency
 		self.hemipheres_ = ['left-hemisphere', 'right-hemisphere']
 
@@ -893,7 +899,7 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(out_statistic_positive, out_statistic_negative)
 
-	def calculate_tstatistics_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67):
+	def calculate_tstatistics_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67, contrast = None):
 		"""
 		Computes Threshold-Free Cluster Enhancement (TFCE) enhanced t-statistics 
 		for both positive and negative contrasts.
@@ -911,7 +917,8 @@ class LinearRegressionModelMRI:
 			The height exponent for TFCE computation (default is 2.0).
 		E : float, optional
 			The extent exponent for TFCE computation (default is 0.67).
-
+		contrast : int, None
+			Set which contrast to calculate TFCE. Other contrasts will be zero.
 		Raises
 		------
 		AssertionError
@@ -936,10 +943,17 @@ class LinearRegressionModelMRI:
 		assert hasattr(ImageObjectMRI, 'adjacency_'), "ImageObjectMRI is missing adjacency_"
 		self.t_tfce_positive_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
 		self.t_tfce_negative_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
+
+		iterator_ = np.arange(0, self.t_.shape[0])
+		if contrast is not None:
+			iterator_ = [iterator_[contrast]]
+
 		if hasattr(ImageObjectMRI, 'hemipheres_'):
-			for c in range(self.t_.shape[0]):
-				if np.sum(np.abs(self.t_[c] > 10)) > int(self.t_[c].shape[0] * 0.90):
-					print("Large t-values[Contrast-%d] detected for >90 percent of the vertices. Skipping TFCE calculation for Contrast-%d" % (c,c))
+			for c in iterator_:
+				if np.sum(self.t_[c] > 0) < 100 or np.sum(self.t_[c] < 0) < 100:
+					print("The t-statistic is in the same direction for almost all vertices. Skipping TFCE calculation for Contrast-%d" % (c))
+				elif np.sum(np.abs(self.t_[c]) > 5) > int(self.t_[c].shape[0] * 0.90):
+					print("abs(t-values)>5 detected for >90 percent of the vertices. Skipping TFCE calculation for Contrast-%d" % (c))
 				else:
 					tfce_values =  self._calculate_surface_tfce(mask_data = ImageObjectMRI.mask_data_,
 																				statistic = self.t_[c].astype(np.float32, order = "C"),
@@ -949,7 +963,7 @@ class LinearRegressionModelMRI:
 					self.t_tfce_negative_[c] = tfce_values[1]
 		else:
 			calcTFCE = CreateAdjSet(H, E, ImageObjectMRI.adjacency_) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
-			for c in range(self.t_.shape[0]):
+			for c in iterator_:
 				tval = self.t_[c]
 				stat = tval.astype(np.float32, order = "C")
 				stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
@@ -1045,7 +1059,7 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(max_pos, max_neg)
 
-	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, use_blocks = True, block_size = 200):
+	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, use_blocks = True, block_size = 384):
 		"""
 		Performs TFCE-based permutation testing for a given contrast index.
 		
@@ -1070,14 +1084,12 @@ class LinearRegressionModelMRI:
 		if whiten:
 			y = y - self.predict(self.X_)
 		X = self.X_
-		print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-		seeds = generate_seeds(n_seeds = int(n_permutations/2))
-		
 		if use_blocks:
 			tfce_maximum_values = []
 			if not n_permutations % block_size == 0:
 				res = n_permutations % block_size
 				n_permutations += (block_size - res)
+			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
 			n_blocks = int(n_permutations/block_size)
 			for b in range(n_blocks):
 				print("Block[%d/%d]: %d Permutations" % (int(b+1), n_blocks, block_size))
@@ -1095,6 +1107,9 @@ class LinearRegressionModelMRI:
 				tfce_maximum_values.append(block_tfce_maximum_values)
 			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
 		else:
+			seeds = generate_seeds(n_seeds = int(n_permutations/2))
+			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+			seeds = generate_seeds(n_seeds = int(n_permutations/2))
 			tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
 													delayed(self._run_tfce_t_permutation)(i = i, 
 																					X = X,
@@ -1424,7 +1439,7 @@ class LinearRegressionModelMRI:
 			X = self._stack_ones(X)
 		return(np.dot(X, self.coef_))
 
-	def write_t_tfce_results(self, contrast_index, data_mask, affine):
+	def write_t_tfce_results(self, ImageObjectMRI, contrast_index, data_mask, affine):
 		"""
 		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
 		
@@ -1452,16 +1467,19 @@ class LinearRegressionModelMRI:
 			contrast_name = "tvalue-con%d" % np.arange(0, len(self.t_),1)[int(contrast_index)]
 		values = self.t_[contrast_index]
 
-		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
-		values = self.t_tfce_positive_[contrast_index]
-		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.nii.gz")
-		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_,values)
-		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.nii.gz")
+		if len(data_mask) == 2:
+			pass #TODO
+		else:
+			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
+			values = self.t_tfce_positive_[contrast_index]
+			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.nii.gz")
+			oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_,values)
+			self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.nii.gz")
 
-		values = self.t_tfce_negative_[contrast_index]
-		self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.nii.gz")
-		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_, values)
-		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
+			values = self.t_tfce_negative_[contrast_index]
+			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.nii.gz")
+			oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_, values)
+			self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
 
 	def write_mediation_z_tfce_results(self, data_mask, affine):
 		"""
@@ -1498,6 +1516,41 @@ class LinearRegressionModelMRI:
 		self.write_nibabel_image(values = self.mediation_z_tfce_, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce.nii.gz")
 		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_,self.mediation_z_tfce_)
 		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce-1minusp.nii.gz")
+
+	def write_freesurfer_image(self, values, data_mask, affine, outname):
+		"""
+		Saves an array of values as FreeSurfer MGH surface scalar images.
+
+		This function applies a binary mask to the input values and saves them as separate 
+		left-hemisphere (lh.mgh) and right-hemisphere (rh.mgh) FreeSurfer MGH files. The input 
+		data is split based on the number of valid data points in the first hemisphere.
+
+		Parameters
+		----------
+		values : numpy.ndarray
+			A 1D array of scalar values to be mapped onto the FreeSurfer surface.
+		data_mask : list of numpy.ndarray
+			A list containing two binary masks (one for each hemisphere) indicating valid data points.
+		affine : numpy.ndarray
+			The affine transformation matrix associated with the image data.
+		outname : str
+			The base filename for the output MGH images. Must end with ".mgh".
+		
+		Notes
+		-----
+		- The function assumes that `data_mask[0]` corresponds to the left hemisphere 
+		  and `data_mask[1]` corresponds to the right hemisphere.
+		- The `values` array should contain concatenated values for both hemispheres.
+		- The output files will be saved as "<outname>.lh.mgh" and "<outname>.rh.mgh".
+		"""
+		if outname.endswith(".mgh"):
+			midpoint = data_mask[0].sum()
+			outdata = np.zeros((data_mask[0].shape[0]))
+			outdata[data_mask[0]==1] = values[:midpoint]
+			nib.save(nib.freesurfer.mghformat.MGHImage(outdata[:,np.newaxis, np.newaxis].astype(np.float32), affine[0]), outname[:-4] + ".lh.mgh")
+			outdata.fill(0)
+			outdata[data_mask[1]==1] = values[midpoint:]
+			nib.save(nib.freesurfer.mghformat.MGHImage(outdata[:,np.newaxis, np.newaxis].astype(np.float32), affine[1]), outname[:-4] + ".rh.mgh")
 
 
 	def write_nibabel_image(self, values, data_mask, affine, outname):
