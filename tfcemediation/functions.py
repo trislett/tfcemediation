@@ -1443,7 +1443,7 @@ class LinearRegressionModelMRI:
 		"""
 		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
 		
-		This function saves multiple NIfTI images containing the t-values, positive and negative
+		This function saves multiple NIfTI or mgh scalar images containing the t-values, positive and negative
 		TFCE values, and their respective corrected p-values.
 
 		Parameters
@@ -1468,7 +1468,16 @@ class LinearRegressionModelMRI:
 		values = self.t_[contrast_index]
 
 		if len(data_mask) == 2:
-			pass #TODO
+			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".mgh")
+			values = self.t_tfce_positive_[contrast_index]
+			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.mgh")
+			oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_,values)
+			self.write_freesurfer_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.mgh")
+
+			values = self.t_tfce_negative_[contrast_index]
+			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.mgh")
+			oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_, values)
+			self.write_freesurfer_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.mgh")
 		else:
 			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
 			values = self.t_tfce_positive_[contrast_index]
