@@ -6,7 +6,6 @@ __pycache__/
 # Cython generated C/C++ files
 *.c
 *.cpp
-*.h
 
 # Compiled object files
 *.o
