@@ -50,6 +50,9 @@ extensions = [
     )
 ]
 
+if os.path.exists('MANIFEST'):
+  os.remove('MANIFEST')
+
 exec(open('tfcemediation/version.py').read())
 setup(name = PACKAGE_NAME, version = __version__, include_package_data=True,
   maintainer = "Tristram Lett",
@@ -63,7 +66,8 @@ setup(name = PACKAGE_NAME, version = __version__, include_package_data=True,
   zip_safe=False,
   install_requires=BUILD_REQUIRES,
   packages=find_packages(),
-  package_data={'tfcemediation': ['static/*', 'static/aseg-subcortical-Surf/*', 'static/JHU-ICBM-Surf/*', 'static/aseg-other-Surf/']},
+  package_dir={'tfcemediation': 'tfcemediation'},
+  package_data={'tfcemediation': ['static/*', 'libs/*', 'static/aseg-subcortical-Surf/*', 'static/JHU-ICBM-Surf/*', 'static/aseg-other-Surf/']},
   ext_modules=cythonize(extensions, language_level="3"),
   python_requires=">=3.7",
 )

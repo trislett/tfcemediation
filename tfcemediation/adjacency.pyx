@@ -20,20 +20,20 @@ from libcpp.vector cimport vector
 #    You should have received a copy of the GNU General Public License
 #    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-cdef extern from "geodesic/geodesic_mesh_elements.h" namespace "geodesic":
+cdef extern from "libs/geodesic/geodesic_mesh_elements.h" namespace "geodesic":
 	cdef cppclass Vertex:
 		Vertex() 
 	cdef cppclass SurfacePoint:
 		SurfacePoint()
 		SurfacePoint(Vertex*)
 
-cdef extern from "geodesic/geodesic_mesh.h" namespace "geodesic":
+cdef extern from "libs/geodesic/geodesic_mesh.h" namespace "geodesic":
 		cdef cppclass Mesh:
 				Mesh()
 				void initialize_mesh_data[P, F](unsigned num_vertices, P*, unsigned num_faces, F*)
 				vector[Vertex]& vertices()
 
-cdef extern from "geodesic/geodesic_algorithm_exact.h" namespace "geodesic":
+cdef extern from "libs/geodesic/geodesic_algorithm_exact.h" namespace "geodesic":
 	cdef cppclass GeodesicAlgorithmExact:
 		GeodesicAlgorithmExact(Mesh*)
 

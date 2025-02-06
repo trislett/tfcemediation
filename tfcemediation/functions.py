@@ -1439,7 +1439,7 @@ class LinearRegressionModelMRI:
 			X = self._stack_ones(X)
 		return(np.dot(X, self.coef_))
 
-	def write_t_tfce_results(self, ImageObjectMRI, contrast_index, data_mask, affine):
+	def write_t_tfce_results(self, ImageObjectMRI, contrast_index):
 		"""
 		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
 		
@@ -1465,6 +1465,8 @@ class LinearRegressionModelMRI:
 			contrast_name = "tvalue-%s" % self.t_contrast_names_[int(contrast_index)]
 		else:
 			contrast_name = "tvalue-con%d" % np.arange(0, len(self.t_),1)[int(contrast_index)]
+		data_mask = ImageObjectMRI.mask_data_
+		affine = ImageObjectMRI.affine_
 		values = self.t_[contrast_index]
 
 		if len(data_mask) == 2:
