@@ -1482,7 +1482,7 @@ class LinearRegressionModelMRI:
 			X = self._stack_ones(X)
 		return(np.dot(X, self.coef_))
 
-	def write_t_tfce_results(self, ImageObjectMRI, contrast_index):
+	def write_t_tfce_results(self, ImageObjectMRI, contrast_index, write_surface_ply = False, surface_ply_vmin = 0.95, surface_ply_vmax = 1.0):
 		"""
 		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
 		
@@ -1516,13 +1516,25 @@ class LinearRegressionModelMRI:
 			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".mgh")
 			values = self.t_tfce_positive_[contrast_index]
 			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.mgh")
-			oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_,values)
-			self.write_freesurfer_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.mgh")
+			oneminuspfwe_pos = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_,values)
+			self.write_freesurfer_image(values = oneminuspfwe_pos, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.mgh")
 
 			values = self.t_tfce_negative_[contrast_index]
 			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.mgh")
-			oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_, values)
-			self.write_freesurfer_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.mgh")
+			oneminuspfwe_neg = 1 - self._calculate_permuted_pvalue(self.t_tfce_max_permutations_, values)
+			self.write_freesurfer_image(values = oneminuspfwe_neg, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.mgh")
+			if write_surface_ply:
+				write_cortical_surface_results_to_ply(positive_scalar_array = oneminuspfwe_pos,
+																	ImageObjectMRI = ImageObjectMRI,
+																	outname = contrast_name + "-tfce-1minusp.ply",
+																	negative_scalar_array = oneminuspfwe_neg,
+																	vmin = surface_ply_vmin,
+																	vmax = surface_ply_vmax,
+																	lh_srf_path = os.path.join(static_directory, 'lh.midthickness.srf'),
+																	rh_srf_path = os.path.join(static_directory, 'rh.midthickness.srf'),
+																	perform_surface_smoothing = True, n_smoothing_iterations = 50,
+																	positive_cmap='red-yellow',
+																	negative_cmap='blue-lightblue')
 		else:
 			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
 			values = self.t_tfce_positive_[contrast_index]
@@ -1778,6 +1790,7 @@ def linear_cm(c0, c1, c2=None):
 			c_map[:, i] = np.linspace(c0[i], c1[i], 256)
 	return c_map
 
+
 def log_cm(c0, c1, c2=None):
 	"""
 	Creates a logarithmic color map lookup table between two or three colors.
@@ -1945,88 +1958,7 @@ def create_lbb_gradient_cmap(linear_alpha=False, return_array=True):
 		return cmap
 
 
-def get_cmap_array(lut, image_alpha=1.0, c_reverse=False):
-	"""
-	Generate an RGBA colormap array based on the specified lookup table (lut) and parameters.
-	Use display_matplotlib_luts() to see the available luts.
-
-	Parameters
-	----------
-	lut : str
-		Lookup table name or abbreviation. Accepted values include:
-		- 'r-y' or 'red-yellow'
-		- 'b-lb' or 'blue-lightblue'
-		- 'g-lg' or 'green-lightgreen'
-		- 'tm-breeze', 'tm-sunset', 'tm-broccoli', 'tm-octopus', 'tm-storm', 'tm-flow', 'tm-logBluGry', 'tm-logRedYel', 'tm-erfRGB', 'tm-white'
-		- 'rywlbb-gradient', 'ryw-gradient', 'lbb-gradient'
-		- Any matplotlib colormap (e.g., 'viridis', 'plasma').
-	image_alpha : float, optional
-		Alpha value for the colormap colors. Default is 1.0.
-	c_reverse : bool, optional
-		Whether to reverse the colormap array. Default is False.
-
-	Returns
-	-------
-	cmap_array : numpy.ndarray
-		Custom RGBA colormap array of shape (256, 4) with values in the range of [0, 255].
-
-	Raises
-	------
-	ValueError
-		If the lookup table is not recognized.
-	"""
-	# Handle reversed colormaps
-	if lut.endswith('_r'):
-		c_reverse = True
-		lut = lut[:-2]
-
-	# Define custom colormap mappings
-	custom_cmaps = {
-		'r-y': linear_cm([255, 0, 0], [255, 255, 0]),
-		'red-yellow': linear_cm([255, 0, 0], [255, 255, 0]),
-		'b-lb': linear_cm([0, 0, 255], [0, 255, 255]),
-		'blue-lightblue': linear_cm([0, 0, 255], [0, 255, 255]),
-		'g-lg': linear_cm([0, 128, 0], [0, 255, 0]),
-		'green-lightgreen': linear_cm([0, 128, 0], [0, 255, 0]),
-		'tm-breeze': linear_cm([199, 233, 180], [65, 182, 196], [37, 52, 148]),
-		'tm-sunset': linear_cm([255, 255, 51], [255, 128, 0], [204, 0, 0]),
-		'tm-broccoli': linear_cm([204, 255, 153], [76, 153, 0], [0, 102, 0]),
-		'tm-octopus': linear_cm([255, 204, 204], [255, 0, 255], [102, 0, 0]),
-		'tm-storm': linear_cm([0, 153, 0], [255, 255, 0], [204, 0, 0]),
-		'tm-flow': log_cm([51, 51, 255], [255, 0, 0], [255, 255, 255]),
-		'tm-logBluGry': log_cm([0, 0, 51], [0, 0, 255], [255, 255, 255]),
-		'tm-logRedYel': log_cm([102, 0, 0], [200, 0, 0], [255, 255, 0]),
-		'tm-erfRGB': erf_cm([255, 0, 0], [0, 255, 0], [0, 0, 255]),
-		'tm-white': linear_cm([255, 255, 255], [255, 255, 255]),
-		'rywlbb-gradient': create_rywlbb_gradient_cmap(),
-		'ryw-gradient': create_ryw_gradient_cmap(),
-		'lbb-gradient': create_lbb_gradient_cmap(),
-	}
-
-	# Generate the colormap array
-	if lut in custom_cmaps:
-		cmap_array = custom_cmaps[lut]
-		if isinstance(cmap_array, np.ndarray):
-			cmap_array = np.column_stack((cmap_array, 255 * np.ones(256) * image_alpha))
-	else:
-		try:
-			cmap_array = plt.cm.get_cmap(lut)(np.arange(256))
-			cmap_array[:, 3] = image_alpha
-			cmap_array *= 255
-		except:
-			raise ValueError(
-				f"Lookup table '{lut}' is not recognized. "
-				"Accepted values include custom colormaps (e.g., 'r-y', 'b-lb') "
-				"or any matplotlib colormap (e.g., 'viridis', 'plasma')."
-			)
-	# Reverse the colormap if requested
-	if c_reverse:
-		cmap_array = cmap_array[::-1]
-	return cmap_array.astype(int)
-
-
-
-def vectorized_surface_smoothing(v, f, number_of_iter = 20, scalar = None, lambda_w = 0.5, use_taubin = False, weighted = True):
+def vectorized_surface_smoothing(v, f, number_of_iter = 20, lambda_w = 0.5, use_taubin = False, weighted = True):
 	"""
 	Applies Laplacian (Gaussian) or Taubin (low-pass) smoothing with option to smooth single volume. Laplacian is the default.
 	
@@ -2112,39 +2044,310 @@ def vectorized_surface_smoothing(v, f, number_of_iter = 20, scalar = None, lambd
 	else:
 		return (v_, f_)
 
+def display_luts():
+	"""
+	Displays a visual representation of colormaps (LUTs - Look-Up Tables) available in Matplotlib,
+	including custom colormaps. This function is adapted from a Matplotlib example.
 
-#def _vertex_paint(positive_scalar, negative_scalar = None, vmin = 0.95, vmax = 1.0, background_color_rbga = [220, 210, 195, 255], positive_cmap = 'red-yellow', negative_cmap = 'blue-lightblue'):
+	The function creates a vertical stack of colormaps, including both built-in Matplotlib colormaps
+	and custom colormaps. Each colormap is displayed as a horizontal gradient.
+
+	Notes
+	-----
+	- The function uses `matplotlib.pyplot` to render the colormaps.
+	- Custom colormaps are defined using RGB values and are normalized to the range [0, 1].
+	- The function includes both linear and logarithmic colormaps.
+
+	References
+	----------
+	- Adapted from: https://matplotlib.org/1.2.1/examples/pylab_examples/show_colormaps.html
+	- Original example from the SciPy Cookbook, author unknown.
+	"""
+	# Create a gradient array for visualization
+	a = np.linspace(0, 1, 256).reshape(1, -1)
+	a = np.vstack((a, a))
+
+	maps = sorted(m for m in plt.cm.datad if not m.endswith("_r"))
+	custom_maps = [
+		'red-yellow', 'blue-lightblue', 'green-lightgreen', 'tm-breeze', 'tm-sunset',
+		'tm-broccoli', 'tm-octopus', 'tm-storm', 'tm-flow', 'tm-logBluGry',
+		'tm-logRedYel', 'tm-erfRGB', 'rywlbb-gradient', 'ryw-gradient', 'lbb-gradient'
+	]
+	maps.extend(custom_maps)
+
+	nmaps = len(maps) + 1
+	fig = plt.figure(figsize=(8, 12))
+	fig.subplots_adjust(top=0.99, bottom=0.01, left=0.2, right=0.99)
+	for i, m in enumerate(maps):
+		ax = plt.subplot(nmaps, 1, i + 1)
+		plt.axis("off")  # Hide axes
+		if m == 'red-yellow':
+			cmap_array = linear_cm([255, 0, 0], [255, 255, 0]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'blue-lightblue':
+			cmap_array = linear_cm([0, 0, 255], [0, 255, 255]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'green-lightgreen':
+			cmap_array = linear_cm([0, 128, 0], [0, 255, 0]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-breeze':
+			cmap_array = linear_cm([199, 233, 180], [65, 182, 196], [37, 52, 148]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-sunset':
+			cmap_array = linear_cm([255, 255, 51], [255, 128, 0], [204, 0, 0]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-storm':
+			cmap_array = linear_cm([0, 153, 0], [255, 255, 0], [204, 0, 0]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-flow':
+			cmap_array = log_cm([51, 51, 255], [255, 0, 0], [255, 255, 255]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-logBluGry':
+			cmap_array = log_cm([0, 0, 51], [0, 0, 255], [255, 255, 255]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-logRedYel':
+			cmap_array = log_cm([102, 0, 0], [200, 0, 0], [255, 255, 0]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-erfRGB':
+			cmap_array = erf_cm([255, 0, 0], [0, 255, 0], [0, 0, 255]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-broccoli':
+			cmap_array = linear_cm([204, 255, 153], [76, 153, 0], [0, 102, 0]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'tm-octopus':
+			cmap_array = linear_cm([255, 204, 204], [255, 0, 255], [102, 0, 0]) / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'rywlbb-gradient':
+			cmap_array = create_rywlbb_gradient_cmap() / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'ryw-gradient':
+			cmap_array = create_ryw_gradient_cmap() / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		elif m == 'lbb-gradient':
+			cmap_array = create_lbb_gradient_cmap() / 255
+			plt.imshow(a, aspect='auto', cmap=ListedColormap(cmap_array, m), origin='lower')
+		else:
+			# Use built-in Matplotlib colormaps
+			plt.imshow(a, aspect='auto', cmap=plt.get_cmap(m), origin='lower')
+		pos = list(ax.get_position().bounds)
+		fig.text(pos[0] - 0.01, pos[1], m, fontsize=10, horizontalalignment='right')
+	plt.show()
+
+def get_cmap_array(lut, image_alpha=1.0, c_reverse=False):
+	"""
+	Generate an RGBA colormap array based on the specified lookup table (lut) and parameters.
+	Use display_matplotlib_luts() to see the available luts.
+
+	Parameters
+	----------
+	lut : str
+		Lookup table name or abbreviation. Accepted values include:
+		- 'r-y' or 'red-yellow'
+		- 'b-lb' or 'blue-lightblue'
+		- 'g-lg' or 'green-lightgreen'
+		- 'tm-breeze', 'tm-sunset', 'tm-broccoli', 'tm-octopus', 'tm-storm', 'tm-flow', 'tm-logBluGry', 'tm-logRedYel', 'tm-erfRGB', 'tm-white'
+		- 'rywlbb-gradient', 'ryw-gradient', 'lbb-gradient'
+		- Any matplotlib colormap (e.g., 'viridis', 'plasma').
+	image_alpha : float, optional
+		Alpha value for the colormap colors. Default is 1.0.
+	c_reverse : bool, optional
+		Whether to reverse the colormap array. Default is False.
+
+	Returns
+	-------
+	cmap_array : numpy.ndarray
+		Custom RGBA colormap array of shape (256, 4) with values in the range of [0, 255].
+
+	Raises
+	------
+	ValueError
+		If the lookup table is not recognized.
+	"""
+	# Handle reversed colormaps
+	if lut.endswith('_r'):
+		c_reverse = True
+		lut = lut[:-2]
+
+	# Define custom colormap mappings
+	custom_cmaps = {
+		'r-y': linear_cm([255, 0, 0], [255, 255, 0]),
+		'red-yellow': linear_cm([255, 0, 0], [255, 255, 0]),
+		'b-lb': linear_cm([0, 0, 255], [0, 255, 255]),
+		'blue-lightblue': linear_cm([0, 0, 255], [0, 255, 255]),
+		'g-lg': linear_cm([0, 128, 0], [0, 255, 0]),
+		'green-lightgreen': linear_cm([0, 128, 0], [0, 255, 0]),
+		'tm-breeze': linear_cm([199, 233, 180], [65, 182, 196], [37, 52, 148]),
+		'tm-sunset': linear_cm([255, 255, 51], [255, 128, 0], [204, 0, 0]),
+		'tm-broccoli': linear_cm([204, 255, 153], [76, 153, 0], [0, 102, 0]),
+		'tm-octopus': linear_cm([255, 204, 204], [255, 0, 255], [102, 0, 0]),
+		'tm-storm': linear_cm([0, 153, 0], [255, 255, 0], [204, 0, 0]),
+		'tm-flow': log_cm([51, 51, 255], [255, 0, 0], [255, 255, 255]),
+		'tm-logBluGry': log_cm([0, 0, 51], [0, 0, 255], [255, 255, 255]),
+		'tm-logRedYel': log_cm([102, 0, 0], [200, 0, 0], [255, 255, 0]),
+		'tm-erfRGB': erf_cm([255, 0, 0], [0, 255, 0], [0, 0, 255]),
+		'tm-white': linear_cm([255, 255, 255], [255, 255, 255]),
+		'rywlbb-gradient': create_rywlbb_gradient_cmap(),
+		'ryw-gradient': create_ryw_gradient_cmap(),
+		'lbb-gradient': create_lbb_gradient_cmap(),
+	}
+
+	# Generate the colormap array
+	if lut in custom_cmaps:
+		cmap_array = custom_cmaps[lut]
+		if isinstance(cmap_array, np.ndarray):
+			cmap_array = np.column_stack((cmap_array, 255 * np.ones(256) * image_alpha))
+	else:
+		try:
+			cmap_array = plt.cm.get_cmap(lut)(np.arange(256))
+			cmap_array[:, 3] = image_alpha
+			cmap_array *= 255
+		except:
+			raise ValueError(
+				f"Lookup table '{lut}' is not recognized. "
+				"Accepted values include custom colormaps (e.g., 'r-y', 'b-lb') "
+				"or any matplotlib colormap (e.g., 'viridis', 'plasma')."
+			)
+	# Reverse the colormap if requested
+	if c_reverse:
+		cmap_array = cmap_array[::-1]
+	return cmap_array.astype(int)
 
 
-#	positive_scalar = 1 - model._calculate_permuted_pvalue(model.t_tfce_max_permutations_, model.t_tfce_positive_[-3])
-#	negative_scalar = 1 - model._calculate_permuted_pvalue(model.t_tfce_max_permutations_, model.t_tfce_negative_[-3])
-#	if negative_scalar is not None:
-#		assert len(positive_scalar) == len(negative_scalar), "positive and negative scalar must have the same length"
-#	pos_cmap_arr = get_cmap_array(positive_cmap)
-#	neg_cmap_arr = get_cmap_array(negative_cmap)
-#	
-#	out_color_arr = np.ones((len(positive_scalar),4), int) * 255
-#	out_color_arr[:] = background_color_rbga
-#	if np.sum(positive_scalar > vmin) != 0:
-#		cnorm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-#		cmap = ListedColormap(np.divide(pos_cmap_arr,255))
-#		mask = positive_scalar > vmin
-#		vals = np.round(cmap(positive_scalar[mask])*255).astype(int)
-#		out_color_arr[mask] = vals
-#	if np.sum(negative_scalar > vmin) != 0:
-#		cnorm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
-#		cmap = ListedColormap(np.divide(neg_cmap_arr,255))
-#		mask = negative_scalar > vmin
-#		vals = np.round(cmap(negative_scalar[mask])*255).astype(int)
-#		out_color_arr[mask] = vals
-#	outdata = np.ones((len(corticalthickness_fu3.mask_data_[0]),4), int) * 255
-#	outdata[corticalthickness_fu3.mask_data_[0] == 1] = out_color_arr[:np.sum(corticalthickness_fu3.mask_data_[0] == 1)]
-#	save_ply(vs, fs, "test_lh_stat_neg3con.ply", color_array=outdata, output_binary=True)
+def _vertex_paint(positive_scalar, negative_scalar=None, vmin=0.95, vmax=1.0, background_color_rbga=[220, 210, 195, 255], positive_cmap='red-yellow', negative_cmap='blue-lightblue'):
+	"""
+	Applies color mapping to vertices based on positive and negative scalar values. 
+	Positive values are mapped to a specified colormap (e.g., red-yellow), while negative values 
+	are mapped to another colormap (e.g., blue-lightblue). Background color is applied to vertices 
+	that do not meet the threshold.
+	
+	Important, thresholding on the 'negative_scalar' is done for same vmin/vmax positive values.
+	So, if positive_scalar=tvalues, then negative_scalar=-tvalues.
 
-#	outdata = np.ones((len(corticalthickness_fu3.mask_data_[1]),4), int) * 255
-#	outdata[corticalthickness_fu3.mask_data_[1] == 1] = out_color_arr[np.sum(corticalthickness_fu3.mask_data_[0] == 1):]
-#	save_ply(vsr, fsr, "test_rh_stat_neg3con.ply", color_array=outdata, output_binary=True)
+	Parameters
+	----------
+	positive_scalar : array
+		Array of positive scalar values for each vertex.
+	negative_scalar : array, optional
+		Array of negative scalar values for each vertex. If provided, it must have the same length as `positive_scalar`.
+	vmin : float, optional
+		Minimum threshold value for applying colormap. Default is 0.95.
+	vmax : float, optional
+		Maximum threshold value for applying colormap. Default is 1.0.
+	background_color_rbga : list, optional
+		Background color in RGBA format for vertices that do not meet the threshold. Default is [220, 210, 195, 255].
+	positive_cmap : str, optional
+		Colormap name for positive scalar values. Default is 'red-yellow'.
+	negative_cmap : str, optional
+		Colormap name for negative scalar values. Default is 'blue-lightblue'.
+
+	Returns
+	-------
+	out_color_arr : array
+		Array of RGBA colors for each vertex, shaped as (n_vertices, 4).
+
+	Notes
+	-----
+	- If 'negative_scalar' is provided, it must have the same length as 'positive_scalar'.
+	- The function uses 'matplotlib.colors.Normalize' and 'ListedColormap' for color mapping.
+	- Vertices with scalar values below `vmin` are assigned the background color.
+	"""
+	if negative_scalar is not None:
+		assert len(positive_scalar) == len(negative_scalar), "positive and negative scalar must have the same length"
+	pos_cmap_arr = get_cmap_array(positive_cmap)
+	neg_cmap_arr = get_cmap_array(negative_cmap)
+	
+	out_color_arr = np.ones((len(positive_scalar), 4), int) * 255
+	out_color_arr[:] = background_color_rbga
+	if np.sum(positive_scalar > vmin) != 0:
+		cnorm = Normalize(vmin=vmin, vmax=vmax)
+		cmap = ListedColormap(np.divide(pos_cmap_arr, 255))
+		mask = positive_scalar > vmin
+		vals = np.round(cmap(positive_scalar[mask]) * 255).astype(int)
+		out_color_arr[mask] = vals
+	if np.sum(negative_scalar > vmin) != 0:
+		cnorm = Normalize(vmin=vmin, vmax=vmax)
+		cmap = ListedColormap(np.divide(neg_cmap_arr, 255))
+		mask = negative_scalar > vmin
+		vals = np.round(cmap(negative_scalar[mask]) * 255).astype(int)
+		out_color_arr[mask] = vals
+	return(out_color_arr)
 
 
+def _add_annotation_wireframe(v, f, freesurfer_annotation_path):
+	labels, _, _ = nib.freesurfer.read_annot(freesurfer_annotation_path)
+	a = np.array([len(set(labels[f[k]])) != 1 for k in range(len(f))])
+	scalar_out = np.zeros_like(labels).astype(np.float32)
+	scalar_out[np.unique(f[a])] = 1
+	return(scalar_out)
 
+
+def write_cortical_surface_results_to_ply(positive_scalar_array, ImageObjectMRI, outname, negative_scalar_array = None, vmin = 0.95, vmax = 1.0, lh_srf_path = os.path.join(static_directory, 'lh.midthickness.srf'), rh_srf_path = os.path.join(static_directory, 'rh.midthickness.srf'), perform_surface_smoothing = True, n_smoothing_iterations = 100, background_color_rbga=[220, 210, 195, 255], positive_cmap='red-yellow', negative_cmap='blue-lightblue'):
+	"""
+	Writes cortical surface results to PLY files by applying color mapping to vertices based on scalar values.
+	The function processes both left and right hemispheres, optionally smooths the surface, and saves the 
+	results as PLY files.
+
+	Parameters
+	----------
+	positive_scalar_array : array
+		Array of positive scalar values for each vertex.
+	ImageObjectMRI : object
+		MRI image object containing cortical surface mask data.
+	outname : str
+		Output filename prefix for the generated PLY files.
+	negative_scalar_array : array, optional
+		Array of negative scalar values for each vertex. If provided, it must have the same length as `positive_scalar_array`.
+	vmin : float, optional
+		Minimum threshold value for applying colormap. Default is 0.95.
+	vmax : float, optional
+		Maximum threshold value for applying colormap. Default is 1.0.
+	lh_srf_path : str, optional
+		Path to the left hemisphere surface file. Default is 'lh.midthickness.srf' in `static_directory`.
+	rh_srf_path : str, optional
+		Path to the right hemisphere surface file. Default is 'rh.midthickness.srf' in `static_directory`.
+	perform_surface_smoothing : bool, optional
+		Whether to apply surface smoothing before saving the PLY file. Default is True.
+	n_smoothing_iterations : int, optional
+		Number of iterations for surface smoothing if enabled. Default is 100.
+	background_color_rbga : list, optional
+		Background color in RGBA format for vertices that do not meet the threshold. Default is [220, 210, 195, 255].
+	positive_cmap : str, optional
+		Colormap name for positive scalar values. Default is 'red-yellow'.
+	negative_cmap : str, optional
+		Colormap name for negative scalar values. Default is 'blue-lightblue'.
+
+	Returns
+	-------
+	None
+		The function saves the cortical surface results as PLY files for the left and right hemispheres.
+
+	Notes
+	-----
+	- The function assumes ImageObjectMRI.mask_data_ contains two elements: one for each hemisphere.
+	- Surface smoothing can be performed using a vectorized smoothing function.
+	- Uses _vertex_paint to apply colormap-based coloring to the vertices.
+	- Output files are saved as '{outname}.lh.ply' and '{outname}.rh.ply'.
+	"""
+	assert len(ImageObjectMRI.mask_data_)==2, "Error: ImageObjectMRI must be a surface (i.e., from CorticalSurfaceImage)"
+	v_lh, f_lh = nib.freesurfer.read_geometry(lh_srf_path)
+	if perform_surface_smoothing:
+		v_lh, f_lh = vectorized_surface_smoothing(v_lh, f_lh, number_of_iter = n_smoothing_iterations, lambda_w = 0.5, use_taubin = False, weighted = True)
+	v_rh, f_rh = nib.freesurfer.read_geometry(rh_srf_path)
+	if perform_surface_smoothing:
+		v_rh, f_rh = vectorized_surface_smoothing(v_rh, f_rh, number_of_iter = n_smoothing_iterations, lambda_w = 0.5, use_taubin = False, weighted = True)
+	
+	color_arr = _vertex_paint(positive_scalar = positive_scalar_array,
+										negative_scalar = negative_scalar_array,
+										vmin = vmin, vmax = vmax,
+										background_color_rbga = background_color_rbga,
+										positive_cmap = positive_cmap,
+										negative_cmap = negative_cmap)
+	# left hemisphere
+	outdata = np.ones((len(ImageObjectMRI.mask_data_[0]),4), int) * 255 # write background 
+	outdata[ImageObjectMRI.mask_data_[0] == 1] = color_arr[:np.sum(ImageObjectMRI.mask_data_[0] == 1)]
+	save_ply(v_lh, f_lh, outname[:-4] + ".lh.ply", color_array=outdata, output_binary=True)
+	# right hemisphere
+	outdata = np.ones((len(ImageObjectMRI.mask_data_[1]),4), int) * 255
+	outdata[ImageObjectMRI.mask_data_[1] == 1] = color_arr[np.sum(ImageObjectMRI.mask_data_[0] == 1):]
+	save_ply(v_rh, f_rh, outname[:-4] + ".rh.ply", color_array=outdata, output_binary=True)
 

@@ -57,7 +57,7 @@ exec(open('tfcemediation/version.py').read())
 setup(name = PACKAGE_NAME, version = __version__, include_package_data=True,
   maintainer = "Tristram Lett",
   maintainer_email = "tris.lett@gmail.com",
-  description = "TFCE_mediation",
+  description = "tfcemediation",
   long_description = "Fast regression and mediation analysis of vertex or voxel MRI data with TFCE",
   url = "https://github.com/trislett/tfce_mediation_slim",
   download_url = "",
