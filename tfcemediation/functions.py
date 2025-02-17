@@ -1,6 +1,8 @@
 #!/usr/bin/env python
 
 import os
+import sys
+import struct
 import warnings
 import pickle
 import gzip
@@ -19,11 +21,17 @@ from joblib import load as jload
 from statsmodels.stats.multitest import fdrcorrection
 from scipy.stats import t as tdist, f as fdist
 from scipy.stats import norm
+from scipy.special import erf
 from tfcemediation.tfce import CreateAdjSet
 from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
 from patsy import dmatrix
 from scipy.ndimage import label as scipy_label
 from scipy.ndimage import generate_binary_structure
+
+import matplotlib.cm as cm
+from matplotlib.colors import Normalize
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+from matplotlib.colorbar import ColorbarBase
 
 # get static resources
 scriptwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -39,7 +47,7 @@ def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	"""
 	Generates a list of random integer seeds.
 	
-	This function creates a list of `n_seeds` random integers within the range [0, maxint],
+	This function creates a list of 'n_seeds' random integers within the range [0, maxint],
 	which can be used for initializing random number generators.
 	
 	Parameters
@@ -52,9 +60,10 @@ def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	Returns
 	-------
 	list
-		A list of `n_seeds` randomly generated integers.
+		A list of 'n_seeds' randomly generated integers.
 	"""
 	return([np.random.randint(0, maxint) for i in range(n_seeds)])
+
 
 def dummy_code(variable, iscontinous = False, demean = True):
 	"""
@@ -85,6 +94,7 @@ def dummy_code(variable, iscontinous = False, demean = True):
 			dummy_vars = dummy_vars - np.mean(dummy_vars,0)
 	return(dummy_vars)
 
+
 def stack_ones(arr):
 	"""
 	Add a column of ones to an array
@@ -100,6 +110,7 @@ def stack_ones(arr):
 	
 	"""
 	return(np.column_stack([np.ones(len(arr)),arr]))
+
 
 def sanitize_columns(s):
 	"""
@@ -168,6 +179,7 @@ def scale_arr(arr, centre = True, scale = True, div_sqrt_nvar = False, axis = 0)
 		x = np.divide(x, np.sqrt(x.shape[1]))
 	return(x)
 
+
 def get_precompiled_freesurfer_adjacency(spatial_smoothing = 3):
 	"""
 	Loads precomputed adjacency matrices from the midthickness FreeSurfer surface for left and right hemispheres.
@@ -188,6 +200,7 @@ def get_precompiled_freesurfer_adjacency(spatial_smoothing = 3):
 	adjacency_lh = np.load('%s/lh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
 	adjacency_rh = np.load('%s/rh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
 	return(adjacency_lh, adjacency_rh)
+
 
 def convert_fslabel(name_fslabel):
 	"""
@@ -229,6 +242,36 @@ def convert_fslabel(name_fslabel):
 		v_ras[i] = np.array(reader[1:4]).astype(np.float32)
 		v_value[i] = np.array(reader[4]).astype(np.float32)
 	return (v_id, v_ras, v_value)
+
+
+def create_vertex_adjacency_neighbors(vertices, faces):
+	"""
+	Creates a vertex adjacency list from a given set of vertices and faces.
+
+	Parameters:
+	-----------
+	vertices : numpy.ndarray
+		A 2D array of shape (N, 3) representing the vertex coordinates, where N is the number of vertices.
+	faces : numpy.ndarray
+		A 2D array of shape (M, 3) representing the face connectivity, where M is the number of faces.
+		Each face is defined by three vertex indices.
+
+	Returns:
+	--------
+	adjacency : list of numpy.ndarray
+		A list of arrays where each array contains the indices of vertices adjacent to the corresponding vertex.
+		For example, `adjacency[i]` contains the indices of vertices adjacent to vertex `i`.
+	"""
+	num_vertices = vertices.shape[0]
+	adjacency = [[] for _ in range(num_vertices)]
+	edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+	edges = np.unique(np.sort(edges, axis=1), axis=0)  # Remove duplicates and sort
+	for v0, v1 in edges:
+		adjacency[v0].append(v1)
+		adjacency[v1].append(v0)
+	adjacency = [np.array(adj, dtype=int) for adj in adjacency]
+	return(adjacency)
+
 
 class CorticalSurfaceImage:
 	"""
@@ -450,7 +493,7 @@ class VoxelImage:
 				mask_data == (labeled_array == largest_label)*1
 		return(mask_data)
 
-	def _create_adjac_voxel(self, data_mask, connectivity_directions=26):
+	def _create_adjacency_voxel(self, data_mask, connectivity_directions=26):
 		"""
 		Generates the adjacency set for the voxel image based on connectivity.
 		
@@ -515,7 +558,7 @@ class VoxelImage:
 				self.image_data_ = self.image_data_[new_mask[self.mask_data_==1] == 1]
 				self.mask_data_ = new_mask
 				self.n_voxels_ = int(self.mask_data.sum())
-		self.adjacency_ = self._create_adjac_voxel(self.mask_data_, connectivity_directions=connectivity_directions)
+		self.adjacency_ = self._create_adjacency_voxel(self.mask_data_, connectivity_directions=connectivity_directions)
 
 	def save(self, filename):
 		"""
@@ -1622,3 +1665,486 @@ class LinearRegressionModelMRI:
 		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
 		with open(filename, 'rb') as f:
 			return pickle.load(f)
+
+
+# additional functions
+
+def save_ply(v, f, outname, color_array=None, output_binary=True):
+	"""
+	Save vertex and face data to a PLY file.
+
+	Parameters:
+	-----------
+	v : numpy.ndarray
+		A 2D array of shape (N, 3) containing the vertex coordinates (x, y, z).
+	f : numpy.ndarray
+		A 2D array of shape (M, 3) containing the face indices (vertex indices).
+	outname : str
+		The output filename. If the filename does not end with '.ply', the extension will be added.
+	color_array : numpy.ndarray, optional
+		A 2D array of shape (N, 3) containing the RGB color values for each vertex. 
+		If provided, the colors will be included in the PLY file.
+	output_binary : bool, optional
+		If True, the PLY file will be saved in binary format. If False, it will be saved in ASCII format.
+		Default is True.
+
+	Returns:
+	--------
+	None
+	"""
+	
+	# Check file extension
+	if not outname.endswith('ply'):
+		outname += '.ply'
+	if not output_binary:
+		outname = outname[:-4] + '.ascii.ply'
+	if os.path.exists(outname):
+		os.remove(outname)
+
+	# Write header
+	header = "ply\n"
+	if output_binary:
+		header += "format binary_{}_endian 1.0\n".format(sys.byteorder)
+		if sys.byteorder == 'little':
+			output_fmt = '<'
+		else:
+			output_fmt = '>'
+	else:
+		header += "format ascii 1.0\n"
+	header += "comment made with TFCE_mediation\n"
+	header += "element vertex {}\n".format(len(v))
+	header += "property float x\n"
+	header += "property float y\n"
+	header += "property float z\n"
+	if color_array is not None:
+		header += "property uchar red\n"
+		header += "property uchar green\n"
+		header += "property uchar blue\n"
+	header += "element face {}\n".format(len(f))
+	header += "property list uchar int vertex_index\n"
+	header += "end_header\n"
+
+	# Write to file
+	if output_binary:
+		with open(outname, "a") as o:
+			o.write(header)
+		with open(outname, "ab") as o:
+			for i in range(len(v)):
+				if color_array is not None:
+					o.write(struct.pack(output_fmt + 'fffBBB', v[i, 0], v[i, 1], v[i, 2], color_array[i, 0], color_array[i, 1], color_array[i, 2]))
+				else:
+					o.write(struct.pack(output_fmt + 'fff', v[i, 0], v[i, 1], v[i, 2]))
+			for j in range(len(f)):
+				o.write(struct.pack('<Biii', 3, f[j, 0], f[j, 1], f[j, 2]))
+	else:
+		with open(outname, "a") as o:
+			o.write(header)
+			for i in range(len(v)):
+				if color_array is not None:
+					o.write("%1.6f %1.6f %1.6f %d %d %d\n" % (v[i, 0], v[i, 1], v[i, 2], color_array[i, 0], color_array[i, 1], color_array[i, 2]))
+				else:
+					o.write("%1.6f %1.6f %1.6f\n" % (v[i, 0], v[i, 1], v[i, 2]))
+			for j in range(len(f)):
+				o.write("3 %d %d %d\n" % (f[j, 0], f[j, 1], f[j, 2]))
+
+
+def linear_cm(c0, c1, c2=None):
+	"""
+	Creates a linear color map lookup table between two or three colors.
+
+	Parameters:
+	-----------
+	c0 : tuple or list
+		A tuple or list of length 3 representing the RGB values of the starting color.
+	c1 : tuple or list
+		A tuple or list of length 3 representing the RGB values of the middle color.
+	c2 : tuple or list, optional
+		A tuple or list of length 3 representing the RGB values of the ending color.
+		If not provided, the color map transitions directly from `c0` to `c1`.
+
+	Returns:
+	--------
+	c_map : numpy.ndarray
+		A 2D array of shape (256, 3) representing the linear color map.
+		Each row corresponds to an RGB color value.
+	"""
+	c_map = np.zeros((256, 3))
+	if c2 is not None:
+		for i in range(3):
+			c_map[0:128, i] = np.linspace(c0[i], c1[i], 128)
+			c_map[127:256, i] = np.linspace(c1[i], c2[i], 129)
+	else:
+		for i in range(3):
+			c_map[:, i] = np.linspace(c0[i], c1[i], 256)
+	return c_map
+
+def log_cm(c0, c1, c2=None):
+	"""
+	Creates a logarithmic color map lookup table between two or three colors.
+
+	Parameters:
+	-----------
+	c0 : tuple or list
+		A tuple or list of length 3 representing the RGB values of the starting color.
+	c1 : tuple or list
+		A tuple or list of length 3 representing the RGB values of the middle color.
+	c2 : tuple or list, optional
+		A tuple or list of length 3 representing the RGB values of the ending color.
+		If not provided, the color map transitions directly from `c0` to `c1`.
+
+	Returns:
+	--------
+	c_map : numpy.ndarray
+		A 2D array of shape (256, 3) representing the logarithmic color map.
+		Each row corresponds to an RGB color value.
+	"""
+	c_map = np.zeros((256, 3))
+	if c2 is not None:
+		for i in range(3):
+			c_map[0:128, i] = np.geomspace(c0[i] + 1, c1[i] + 1, 128) - 1
+			c_map[127:256, i] = np.geomspace(c1[i] + 1, c2[i] + 1, 129) - 1
+	else:
+		for i in range(3):
+			c_map[:, i] = np.geomspace(c0[i] + 1, c1[i] + 1, 256) - 1
+	return c_map
+
+
+def erf_cm(c0, c1, c2=None):
+	"""
+	Creates a color map lookup table using the error function (erf) between two or three colors.
+
+	Parameters:
+	-----------
+	c0 : tuple or list
+		A tuple or list of length 3 representing the RGB values of the starting color.
+	c1 : tuple or list
+		A tuple or list of length 3 representing the RGB values of the middle color.
+	c2 : tuple or list, optional
+		A tuple or list of length 3 representing the RGB values of the ending color.
+		If not provided, the color map transitions directly from `c0` to `c1`.
+
+	Returns:
+	--------
+	c_map : numpy.ndarray
+		A 2D array of shape (256, 3) representing the error function-based color map.
+		Each row corresponds to an RGB color value.
+	"""
+	c_map = np.zeros((256, 3))
+	if c2 is not None:
+		for i in range(3):
+			c_map[0:128, i] = erf(np.linspace(3 * (c0[i] / 255), 3 * (c1[i] / 255), 128)) * 255
+			c_map[127:256, i] = erf(np.linspace(3 * (c1[i] / 255), 3 * (c2[i] / 255), 129)) * 255
+	else:
+		for i in range(3):
+			c_map[:, i] = erf(np.linspace(3 * (c0[i] / 255), 3 * (c1[i] / 255), 256)) * 255
+	return c_map
+
+
+def create_rywlbb_gradient_cmap(linear_alpha=False, return_array=True):
+	"""
+	Creates a colormap for a gradient from red-yellow-white-light blue-blue (rywlbb).
+
+	Parameters:
+	-----------
+	linear_alpha : bool, optional
+		If True, applies a linear alpha gradient to the colormap. Default is False.
+	return_array : bool, optional
+		If True, returns the colormap as a NumPy array. If False, returns a matplotlib colormap object.
+		Default is True.
+
+	Returns:
+	--------
+	cmap_array : numpy.ndarray or matplotlib.colors.LinearSegmentedColormap
+		If `return_array` is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
+		If `return_array` is False, returns a matplotlib colormap object.
+	"""
+	colors = ["#00008C", "#2234A8", "#4467C4", "#659BDF", "#87CEFB", "white", "#ffec19", "#ffc100", "#ff9800", "#ff5607", "#f6412d"]
+	cmap = LinearSegmentedColormap.from_list("rywlbb-gradient", colors)
+	cmap._init()  # Initialize the colormap
+	if return_array:
+		crange = np.linspace(0, 1, 256)
+		cmap_array = cmap(crange)
+		if linear_alpha:
+			cmap_array[:, -1] = np.abs(np.linspace(-1, 1, 256))
+		cmap_array *= 255
+		cmap_array = cmap_array.astype(int)
+		return cmap_array
+	else:
+		if linear_alpha:
+			cmap._lut[:256, -1] = np.abs(np.linspace(-1, 1, 256))
+		return cmap
+
+
+def create_ryw_gradient_cmap(linear_alpha=False, return_array=True):
+	"""
+	Creates a colormap for a gradient from red-yellow-white (ryw).
+
+	Parameters:
+	-----------
+	linear_alpha : bool, optional
+		If True, applies a linear alpha gradient to the colormap. Default is False.
+	return_array : bool, optional
+		If True, returns the colormap as a NumPy array. If False, returns a matplotlib colormap object.
+		Default is True.
+
+	Returns:
+	--------
+	cmap_array : numpy.ndarray or matplotlib.colors.LinearSegmentedColormap
+		If `return_array` is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
+		If `return_array` is False, returns a matplotlib colormap object.
+	"""
+	colors = ["white", "#ffec19", "#ffc100", "#ff9800", "#ff5607", "#f6412d"]
+	cmap = LinearSegmentedColormap.from_list("ryw-gradient", colors)
+	cmap._init()  # Initialize the colormap
+	if return_array:
+		crange = np.linspace(0, 1, 256)
+		cmap_array = cmap(crange)
+		if linear_alpha:
+			cmap_array[:, -1] = np.linspace(0, 1, 256)
+		cmap_array *= 255
+		cmap_array = cmap_array.astype(int)
+		return cmap_array
+	else:
+		if linear_alpha:
+			cmap._lut[:256, -1] = np.linspace(0, 1, 256)
+		return cmap
+
+
+def create_lbb_gradient_cmap(linear_alpha=False, return_array=True):
+	"""
+	Creates a colormap for a gradient from light blue-blue (lbb).
+
+	Parameters:
+	-----------
+	linear_alpha : bool, optional
+		If True, applies a linear alpha gradient to the colormap. Default is False.
+	return_array : bool, optional
+		If True, returns the colormap as a NumPy array. If False, returns a matplotlib colormap object.
+		Default is True.
+
+	Returns:
+	--------
+	cmap_array : numpy.ndarray or matplotlib.colors.LinearSegmentedColormap
+		If `return_array` is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
+		If `return_array` is False, returns a matplotlib colormap object.
+	"""
+	colors = ["white", "#87CEFB", "#659BDF", "#4467C4", "#2234A8", "#00008C"]
+	cmap = LinearSegmentedColormap.from_list("lbb-gradient", colors)
+	cmap._init()  # Initialize the colormap
+	if return_array:
+		crange = np.linspace(0, 1, 256)
+		cmap_array = cmap(crange)
+		if linear_alpha:
+			cmap_array[:, -1] = np.linspace(0, 1, 256)
+		cmap_array *= 255
+		cmap_array = cmap_array.astype(int)
+		return cmap_array
+	else:
+		if linear_alpha:
+			cmap._lut[:256, -1] = np.linspace(0, 1, 256)
+		return cmap
+
+
+def get_cmap_array(lut, image_alpha=1.0, c_reverse=False):
+	"""
+	Generate an RGBA colormap array based on the specified lookup table (lut) and parameters.
+	Use display_matplotlib_luts() to see the available luts.
+
+	Parameters
+	----------
+	lut : str
+		Lookup table name or abbreviation. Accepted values include:
+		- 'r-y' or 'red-yellow'
+		- 'b-lb' or 'blue-lightblue'
+		- 'g-lg' or 'green-lightgreen'
+		- 'tm-breeze', 'tm-sunset', 'tm-broccoli', 'tm-octopus', 'tm-storm', 'tm-flow', 'tm-logBluGry', 'tm-logRedYel', 'tm-erfRGB', 'tm-white'
+		- 'rywlbb-gradient', 'ryw-gradient', 'lbb-gradient'
+		- Any matplotlib colormap (e.g., 'viridis', 'plasma').
+	image_alpha : float, optional
+		Alpha value for the colormap colors. Default is 1.0.
+	c_reverse : bool, optional
+		Whether to reverse the colormap array. Default is False.
+
+	Returns
+	-------
+	cmap_array : numpy.ndarray
+		Custom RGBA colormap array of shape (256, 4) with values in the range of [0, 255].
+
+	Raises
+	------
+	ValueError
+		If the lookup table is not recognized.
+	"""
+	# Handle reversed colormaps
+	if lut.endswith('_r'):
+		c_reverse = True
+		lut = lut[:-2]
+
+	# Define custom colormap mappings
+	custom_cmaps = {
+		'r-y': linear_cm([255, 0, 0], [255, 255, 0]),
+		'red-yellow': linear_cm([255, 0, 0], [255, 255, 0]),
+		'b-lb': linear_cm([0, 0, 255], [0, 255, 255]),
+		'blue-lightblue': linear_cm([0, 0, 255], [0, 255, 255]),
+		'g-lg': linear_cm([0, 128, 0], [0, 255, 0]),
+		'green-lightgreen': linear_cm([0, 128, 0], [0, 255, 0]),
+		'tm-breeze': linear_cm([199, 233, 180], [65, 182, 196], [37, 52, 148]),
+		'tm-sunset': linear_cm([255, 255, 51], [255, 128, 0], [204, 0, 0]),
+		'tm-broccoli': linear_cm([204, 255, 153], [76, 153, 0], [0, 102, 0]),
+		'tm-octopus': linear_cm([255, 204, 204], [255, 0, 255], [102, 0, 0]),
+		'tm-storm': linear_cm([0, 153, 0], [255, 255, 0], [204, 0, 0]),
+		'tm-flow': log_cm([51, 51, 255], [255, 0, 0], [255, 255, 255]),
+		'tm-logBluGry': log_cm([0, 0, 51], [0, 0, 255], [255, 255, 255]),
+		'tm-logRedYel': log_cm([102, 0, 0], [200, 0, 0], [255, 255, 0]),
+		'tm-erfRGB': erf_cm([255, 0, 0], [0, 255, 0], [0, 0, 255]),
+		'tm-white': linear_cm([255, 255, 255], [255, 255, 255]),
+		'rywlbb-gradient': create_rywlbb_gradient_cmap(),
+		'ryw-gradient': create_ryw_gradient_cmap(),
+		'lbb-gradient': create_lbb_gradient_cmap(),
+	}
+
+	# Generate the colormap array
+	if lut in custom_cmaps:
+		cmap_array = custom_cmaps[lut]
+		if isinstance(cmap_array, np.ndarray):
+			cmap_array = np.column_stack((cmap_array, 255 * np.ones(256) * image_alpha))
+	else:
+		try:
+			cmap_array = plt.cm.get_cmap(lut)(np.arange(256))
+			cmap_array[:, 3] = image_alpha
+			cmap_array *= 255
+		except:
+			raise ValueError(
+				f"Lookup table '{lut}' is not recognized. "
+				"Accepted values include custom colormaps (e.g., 'r-y', 'b-lb') "
+				"or any matplotlib colormap (e.g., 'viridis', 'plasma')."
+			)
+	# Reverse the colormap if requested
+	if c_reverse:
+		cmap_array = cmap_array[::-1]
+	return cmap_array.astype(int)
+
+
+
+def vectorized_surface_smoothing(v, f, number_of_iter = 20, scalar = None, lambda_w = 0.5, use_taubin = False, weighted = True):
+	"""
+	Applies Laplacian (Gaussian) or Taubin (low-pass) smoothing with option to smooth single volume. Laplacian is the default.
+	
+	Citations
+	----------
+	
+	Herrmann, Leonard R. (1976), "Laplacian-isoparametric grid generation scheme", Journal of the Engineering Mechanics Division, 102 (5): 749-756.
+	Taubin, Gabriel. "A signal processing approach to fair surface design." Proceedings of the 22nd annual conference on Computer graphics and interactive techniques. ACM, 1995.
+	
+	Parameters
+	----------
+	v : array
+		vertex array
+	f : array
+		face array
+	adjacency : array
+		adjacency array
+
+	Flags
+	----------
+	number_of_iter : int
+		number of smoothing iterations
+	lambda_w : float
+		lamda weighting of degree of movement for each iteration
+		The weighting should never be above 1.0
+	use_taubin : bool
+		Use taubin (no shrinkage) instead of laplacian (which cause surface shrinkage) smoothing.
+		
+	Returns
+	-------
+	v_ : array
+		smoothed vertices array
+	f_ : array
+		f = face array (unchanged)
+	"""
+	v_ = np.array(v).copy()
+	f_ = np.array(f).copy()
+	adjacency_ = create_vertex_adjacency_neighbors(v_, f_)
+
+	k = 0.1
+	mu_w = -np.divide(lambda_w, (1-k*lambda_w))
+
+	lengths = np.array([len(a) for a in adjacency_])
+	maxlen = max(lengths)
+	padded = [list(a) + [-1] * (maxlen - len(a)) for a in adjacency_]
+	adj = np.array(padded)
+	adj_mask = adj != -1  # Mask for valid adjacency indices
+
+	w = np.ones(adj.shape, dtype=float)
+	w[adj<0] = 0.
+	val = (adj>=0).sum(-1).reshape(-1, 1)
+	val[val == 0] = 1
+	w /= val
+	w = w.reshape(adj.shape[0], adj.shape[1], 1)
+
+	for iter_num in range(number_of_iter):
+		if weighted:
+			vadj = v_[adj]
+			vadj = np.swapaxes(vadj, 1, 2)
+			weights = np.zeros((v_.shape[0], maxlen))
+			for col in range(maxlen):
+				dist = np.linalg.norm(vadj[:, :, col] - v, axis=1)
+				dist[dist == 0] = 1
+				weights[:, col] = np.power(dist, -1)
+			weights[~adj_mask] = 0
+			vectors = np.einsum('abc,adc->acd', weights[:,None], vadj)
+			with np.errstate(divide='ignore', invalid='ignore'):
+				if iter_num % 2 == 0:
+					v_ += lambda_w*(np.divide(np.sum(vectors, axis = 1), np.sum(weights[:,None], axis = 2)) - v_)
+				elif use_taubin:
+					v_ += mu_w*(np.divide(np.sum(vectors, axis = 1), np.sum(weights[:,None], axis = 2)) - v_)
+				else:
+					v_ += lambda_w*(np.divide(np.sum(vectors, axis = 1), np.sum(weights[:,None], axis = 2)) - v_)
+			v_[np.isnan(v_)] = np.array(v)[np.isnan(v_)] # hacky vertex nan fix
+		else:
+			with np.errstate(divide='ignore', invalid='ignore'):
+				if iter_num % 2 == 0:
+					v_ += np.array(lambda_w*np.swapaxes(w,0,1)*(np.swapaxes(v_[adj], 0, 1)-v_)).sum(0)
+				elif use_taubin:
+					v_ += np.array(mu_w*np.swapaxes(w,0,1)*(np.swapaxes(v_[adj], 0, 1)-v_)).sum(0)
+				else:
+					v_ += np.array(lambda_w*np.swapaxes(w,0,1)*(np.swapaxes(v_[adj], 0, 1)-v_)).sum(0)
+	else:
+		return (v_, f_)
+
+
+#def _vertex_paint(positive_scalar, negative_scalar = None, vmin = 0.95, vmax = 1.0, background_color_rbga = [220, 210, 195, 255], positive_cmap = 'red-yellow', negative_cmap = 'blue-lightblue'):
+
+
+#	positive_scalar = 1 - model._calculate_permuted_pvalue(model.t_tfce_max_permutations_, model.t_tfce_positive_[-3])
+#	negative_scalar = 1 - model._calculate_permuted_pvalue(model.t_tfce_max_permutations_, model.t_tfce_negative_[-3])
+#	if negative_scalar is not None:
+#		assert len(positive_scalar) == len(negative_scalar), "positive and negative scalar must have the same length"
+#	pos_cmap_arr = get_cmap_array(positive_cmap)
+#	neg_cmap_arr = get_cmap_array(negative_cmap)
+#	
+#	out_color_arr = np.ones((len(positive_scalar),4), int) * 255
+#	out_color_arr[:] = background_color_rbga
+#	if np.sum(positive_scalar > vmin) != 0:
+#		cnorm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+#		cmap = ListedColormap(np.divide(pos_cmap_arr,255))
+#		mask = positive_scalar > vmin
+#		vals = np.round(cmap(positive_scalar[mask])*255).astype(int)
+#		out_color_arr[mask] = vals
+#	if np.sum(negative_scalar > vmin) != 0:
+#		cnorm = mpl.colors.Normalize(vmin=vmin, vmax=vmax)
+#		cmap = ListedColormap(np.divide(neg_cmap_arr,255))
+#		mask = negative_scalar > vmin
+#		vals = np.round(cmap(negative_scalar[mask])*255).astype(int)
+#		out_color_arr[mask] = vals
+#	outdata = np.ones((len(corticalthickness_fu3.mask_data_[0]),4), int) * 255
+#	outdata[corticalthickness_fu3.mask_data_[0] == 1] = out_color_arr[:np.sum(corticalthickness_fu3.mask_data_[0] == 1)]
+#	save_ply(vs, fs, "test_lh_stat_neg3con.ply", color_array=outdata, output_binary=True)
+
+#	outdata = np.ones((len(corticalthickness_fu3.mask_data_[1]),4), int) * 255
+#	outdata[corticalthickness_fu3.mask_data_[1] == 1] = out_color_arr[np.sum(corticalthickness_fu3.mask_data_[0] == 1):]
+#	save_ply(vsr, fsr, "test_rh_stat_neg3con.ply", color_array=outdata, output_binary=True)
+
+
+
+
