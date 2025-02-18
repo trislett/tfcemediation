@@ -23,6 +23,7 @@ from scipy.stats import t as tdist, f as fdist
 from scipy.stats import norm
 from scipy.special import erf
 from tfcemediation.tfce import CreateAdjSet
+from tfcemediation.adjacency import compute
 from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
 from patsy import dmatrix
 from scipy.ndimage import label as scipy_label
@@ -180,14 +181,14 @@ def scale_arr(arr, centre = True, scale = True, div_sqrt_nvar = False, axis = 0)
 	return(x)
 
 
-def get_precompiled_freesurfer_adjacency(spatial_smoothing = 3):
+def get_precompiled_freesurfer_adjacency(geodesic_distance = 3):
 	"""
 	Loads precomputed adjacency matrices from the midthickness FreeSurfer surface for left and right hemispheres.
 	
 	Parameters
 	----------
-	spatial_smoothing : int, optional
-		The amount of spatial smoothing applied (default is 3).
+	geodesic_distance : int, optional
+		The geodesic distance of the adjacency (default is 3).
 	
 	Returns
 	-------
@@ -197,8 +198,9 @@ def get_precompiled_freesurfer_adjacency(spatial_smoothing = 3):
 		adjacency_rh : numpy array
 			Adjacency matrix for the right hemisphere.
 	"""
-	adjacency_lh = np.load('%s/lh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
-	adjacency_rh = np.load('%s/rh_adjacency_dist_%d.0_mm.npy' % (static_directory, spatial_smoothing), allow_pickle=True)
+	assert geodesic_distance in np.array([1,2,3]), "Error: the geodesic distance must be 1, 2, or 3 for precompiled matrices"
+	adjacency_lh = np.load('%s/lh_adjacency_dist_%d.0_mm.npy' % (static_directory, int(geodesic_distance)), allow_pickle=True)
+	adjacency_rh = np.load('%s/rh_adjacency_dist_%d.0_mm.npy' % (static_directory, int(geodesic_distance)), allow_pickle=True)
 	return(adjacency_lh, adjacency_rh)
 
 
@@ -260,7 +262,6 @@ def create_vertex_adjacency_neighbors(vertices, faces):
 	--------
 	adjacency : list of numpy.ndarray
 		A list of arrays where each array contains the indices of vertices adjacent to the corresponding vertex.
-		For example, `adjacency[i]` contains the indices of vertices adjacent to vertex `i`.
 	"""
 	num_vertices = vertices.shape[0]
 	adjacency = [[] for _ in range(num_vertices)]
@@ -271,6 +272,42 @@ def create_vertex_adjacency_neighbors(vertices, faces):
 		adjacency[v1].append(v0)
 	adjacency = [np.array(adj, dtype=int) for adj in adjacency]
 	return(adjacency)
+
+
+def create_vertex_adjacency_geodesic(vertices, faces, geodesic_distance=3.0):
+	"""
+	Creates a vertex adjacency list based on geodesic distance for a given mesh.
+	The adjacency matrices for geodesic distances for {1.0,2.0,3.0} are already precompiled (get_precompiled_freesurfer_adjacency) 
+	for the freesurfer fsaverage surfaces (midthickness: halfway between white and pial surfaces). Only use this function if you 
+	want to create adjacency lists for a new surface or a geodesic distance other than those listed above.
+
+	The function computes adjacency relationships between vertices by determining which vertices
+	are within a specified geodesic distance on the mesh surface. It takes approximately an hour to finish.
+	Unfortunately, the inner function (tfcemediation.adjacency.compute) is not easily parallelizable.
+
+	Parameters:
+	-----------
+	vertices : numpy.ndarray
+		A 2D array of shape (N, 3) representing the vertex coordinates, where N is the number of vertices.
+		Each row corresponds to the (x, y, z) coordinates of a vertex.
+	faces : numpy.ndarray
+		A 2D array of shape (M, 3) representing the face connectivity, where M is the number of faces.
+		Each row contains three vertex indices that define a triangular face.
+	geodesic_distance : float, optional
+		The maximum geodesic distance (shortest path along the mesh surface) to consider two vertices as adjacent.
+		Default is 3.0.
+
+	Returns:
+	--------
+	adjacency : list of numpy.ndarray
+		A list of arrays where each array contains the indices of vertices adjacent to the corresponding vertex.
+		The i-th element of the list corresponds to the adjacency list for the i-th vertex.
+	"""
+	vertices = vertices.astype(np.float32, order="C")
+	faces = faces.astype(np.int32, order="C")
+	dist_arr = np.array([geodesic_distance], dtype=np.float32)
+	adjacency = compute(vertices, faces, dist_arr)
+	return(adjacency[0])
 
 
 class CorticalSurfaceImage:
