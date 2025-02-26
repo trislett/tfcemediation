@@ -7,8 +7,10 @@ import warnings
 import pickle
 import gzip
 import shutil
+import subprocess
 import gc
 import time
+import datetime
 import re
 
 import nibabel as nib
@@ -16,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from tqdm import tqdm
+from glob import glob
 from joblib import Parallel, delayed, wrap_non_picklable_objects, dump
 from joblib import load as jload
 from statsmodels.stats.multitest import fdrcorrection
@@ -310,6 +313,122 @@ def create_vertex_adjacency_geodesic(vertices, faces, geodesic_distance=3.0):
 	return(adjacency[0])
 
 
+def register_freesurfer_surfaces(subjects, surface, subjects_dir = None, num_cores=16, tempdir=None, approximate_fwhm = 3):
+	"""
+	Registers FreeSurfer surface data to the fsaverage template using spherical registration.
+
+	Parameters:
+	-----------
+	subjects : list of str
+		A list of subject IDs corresponding to directories within the FreeSurfer subjects directory.
+	surface : str
+		The surface metric to register. Must be either 'area' or 'thickness'.
+	subjects_dir : str, optional
+		Path to the FreeSurfer subjects directory. If None, defaults to the SUBJECTS_DIR environment variable.
+	num_cores : int, optional
+		Number of CPU cores to use for parallel processing. Default is 16.
+	tempdir : str, optional
+		Path to a temporary directory for storing intermediate registration files. If None, a new directory is created.
+	approximate_fwhm : int or None, optional
+		Approximate full-width at half-maximum (FWHM) in mm for smoothing the registered surface data. 
+		If None, no smoothing is applied. Default is 3mm.
+
+	Returns:
+	--------
+	tempdir : str
+		Path to the directory containing the registered and optionally smoothed surface data.
+
+	Raises:
+	-------
+	EnvironmentError
+		If required FreeSurfer environment variables (FREESURFER_HOME or SUBJECTS_DIR) are not set.
+	AssertionError
+		If the subjects directory does not exist or if an invalid surface type is provided.
+
+	Notes:
+	------
+	- The function ensures the FreeSurfer subjects directory is correctly set up.
+	- Surface data is registered to fsaverage using 'mri_surf2surf' with spherical registration.
+	- If the fsaverage subject is not found in the subjects directory, a symbolic link is created.
+	- Parallel processing is used to accelerate registration across subjects.
+	- Optionally applies smoothing using an approximate FWHM value.
+	"""
+
+	# Check environment variables
+	fs_home = os.environ.get('FREESURFER_HOME')
+	if not fs_home:
+		raise EnvironmentError("FREESURFER_HOME environment variable not set")
+	if subjects_dir is None:
+		subjects_dir = os.environ.get('SUBJECTS_DIR')
+		if not subjects_dir:
+			raise EnvironmentError("SUBJECTS_DIR environment variable not set")
+		print("Using subjects_dir : %s" % subjects_dir)
+	assert os.path.exists(subjects_dir), "Error: subjects directory does not exist [%s]" % subjects_dir
+	assert surface in ['area','thickness'], "Error: surface [%s] must be either {area, thickness}" % surface
+
+	# set $SUBJECTS_DIR and create fsaverage symbolic link if necessary
+	os.environ["SUBJECTS_DIR"] = subjects_dir
+	if not os.path.exists(subjects_dir + "/fsaverage"):
+		fsaverage_dir = fs_home + '/subjects/fsaverage'
+		fsaverage_link = subjects_dir + "/fsaverage"
+		os.symlink(fsaverage_dir, fsaverage_link)
+
+	# Create temporary directory
+	if tempdir is None:
+		timestamp = datetime.datetime.now().strftime('%Y_%m_%d_%H%M%S')
+		tempdir = f"temp_{surface}_{timestamp}"
+	os.makedirs(tempdir, exist_ok=True)
+
+	# Generate registration commands
+	registration_commands = []
+	for hemi in ['lh', 'rh']:
+		for subject in subjects:
+			src_surf = os.path.join(subjects_dir, subject, 'surf', f"{hemi}.{surface}")
+			tval = os.path.join(tempdir, f"{hemi}.{subject}.{surface}.00.mgh")
+			cmd = [
+				os.path.join(fs_home, 'bin', 'mri_surf2surf'),
+				'--srcsubject', subject,
+				'--srchemi', hemi,
+				'--srcsurfreg', 'sphere.reg',
+				'--trgsubject', 'fsaverage',
+				'--trghemi', hemi,
+				'--trgsurfreg', 'sphere.reg',
+				'--tval', tval,
+				'--sval', src_surf,
+				'--jac',
+				'--sfmt', 'curv',
+				'--noreshape',
+				'--cortex'
+			]
+			registration_commands.append(cmd)
+
+	def run_command(cmd):
+		subprocess.run(cmd, check=True)
+	_ = Parallel(n_jobs=num_cores)(delayed(run_command)(cmd) for cmd in registration_commands)
+
+	if approximate_fwhm is not None:
+		approximate_fwhm = int(approximate_fwhm)
+		# 3mm approximate FWHM smoothing
+		smoothing_commands = []
+		for hemi in ['lh', 'rh']:
+			pattern = os.path.join(tempdir, f"{hemi}.*.{surface}.00.mgh")
+			for file_path in glob(pattern):
+				output_path = file_path.replace('.00.mgh', '.0%dB.mgh' % approximate_fwhm)
+				cmd = [
+					os.path.join(fs_home, 'bin', 'mri_surf2surf'),
+					'--hemi', hemi,
+					'--s', 'fsaverage',
+					'--sval', file_path,
+					'--tval', output_path,
+					'--fwhm-trg', '%d' % approximate_fwhm,
+					'--noreshape',
+					'--cortex'
+				]
+				smoothing_commands.append(cmd)
+		_ = Parallel(n_jobs=num_cores)(delayed(run_command)(cmd) for cmd in smoothing_commands)
+	return(tempdir)
+
+
 class CorticalSurfaceImage:
 	"""
 	Represents a cortical surface image,masking them by non-zero data, and calculatign their adjacency for statistical analyses from FreeSurfer files. 
@@ -331,39 +450,159 @@ class CorticalSurfaceImage:
 		adjacency_rh_path : str, optional
 			If None, then the precomputed right hemisphere adjacency matrix at 3mm geodesic distance.
 		"""
-		surface_lh = nib.freesurfer.mghformat.load(surfaces_lh_path)
-		data_lh = surface_lh.get_fdata()[:,0,0,:]
-		n_vertices_lh, n_subjects = data_lh.shape
-		affine_lh = surface_lh.affine
-		header_lh = surface_lh.header
-		mask_index_lh = convert_fslabel('%s/lh.cortex.label' % static_directory)[0]
-		
-		bin_mask_lh = np.zeros_like(data_lh.mean(1))
-		bin_mask_lh[mask_index_lh]=1
-		bin_mask_lh = bin_mask_lh.astype(int)
-		
-		data_lh = data_lh[bin_mask_lh == 1].astype(np.float32, order = "C")
-		surface_rh = nib.freesurfer.mghformat.load(surfaces_rh_path)
-		data_rh = surface_rh.get_fdata()[:,0,0,:]
-		n_vertices_rh, _ = data_rh.shape
-		affine_rh = surface_rh.affine
-		header_rh = surface_rh.header
-		mask_index_rh = convert_fslabel('%s/rh.cortex.label' % static_directory)[0]
-		
-		bin_mask_rh = np.zeros_like(data_rh.mean(1))
-		bin_mask_rh[mask_index_rh]=1
-		bin_mask_rh = bin_mask_rh.astype(int)
-		
-		data_rh = data_rh[bin_mask_rh == 1].astype(np.float32, order = "C")
+
+		if surfaces_lh_path is not None:
+			if isinstance(surfaces_lh_path, str):
+				surface_lh = nib.freesurfer.mghformat.load(surfaces_lh_path)
+				data_lh = surface_lh.get_fdata()[:,0,0,:]
+				n_vertices_lh, n_subjects = data_lh.shape
+				affine_lh = surface_lh.affine
+				header_lh = surface_lh.header
+				mask_index_lh = convert_fslabel('%s/lh.cortex.label' % static_directory)[0]
+				
+				bin_mask_lh = np.zeros_like(data_lh.mean(1))
+				bin_mask_lh[mask_index_lh]=1
+				bin_mask_lh = bin_mask_lh.astype(int)
+				data_lh = data_lh[bin_mask_lh == 1].astype(np.float32, order = "C")
+			if isinstance(surfaces_lh_path, list):
+				data_lh, n_vertices_lh, affine_lh, header_lh, bin_mask_lh = self._process_freesurfer_surfaces_path_list(surfaces_path = surfaces_lh_path,
+																																					hemisphere = 'lh')
+
+		if surfaces_rh_path is not None:
+			if isinstance(surfaces_rh_path, str):
+				surface_rh = nib.freesurfer.mghformat.load(surfaces_rh_path)
+				data_rh = surface_rh.get_fdata()[:,0,0,:]
+				n_vertices_rh, _ = data_rh.shape
+				affine_rh = surface_rh.affine
+				header_rh = surface_rh.header
+				mask_index_rh = convert_fslabel('%s/rh.cortex.label' % static_directory)[0]
+				
+				bin_mask_rh = np.zeros_like(data_rh.mean(1))
+				bin_mask_rh[mask_index_rh]=1
+				bin_mask_rh = bin_mask_rh.astype(int)
+				data_rh = data_rh[bin_mask_rh == 1].astype(np.float32, order = "C")
+			if isinstance(surfaces_rh_path, list):
+				data_rh, n_vertices_rh, affine_rh, header_rh, bin_mask_rh = self._process_freesurfer_surfaces_path_list(surfaces_path = surfaces_rh_path,
+																																					hemisphere = 'rh')
+
 		if adjacency_lh_path is None and adjacency_rh_path is None:
 			adjacency = get_precompiled_freesurfer_adjacency(spatial_smoothing = 3)
+
+		if surfaces_lh_path is None and surfaces_rh_path is None:
+			print("Surface files (scalars) not provided. Use build_freesurfer_surfaces_parallel if the files do not exist")
+		else:
+			self.image_data_ = np.concatenate([data_lh, data_rh]).astype(np.float32, order = "C")
+			self.affine_ = [affine_lh, affine_rh]
+			self.header_ = [header_lh, header_rh]
+			self.n_vertices_ = [n_vertices_lh, n_vertices_rh]
+			self.mask_data_ = [bin_mask_lh, bin_mask_rh]
+		
+		self.adjacency_ = adjacency
+		self.hemipheres_ = ['left-hemisphere', 'right-hemisphere']
+
+	def _process_freesurfer_surfaces_path_list(self, surfaces_path, hemisphere):
+		"""
+		Loads and processes FreeSurfer surface data for a given hemisphere.
+
+		Parameters:
+		-----------
+		surfaces_path : list of str
+			A list of file paths to the FreeSurfer surface metric files (.mgh format).
+		hemisphere : str
+			The hemisphere being processed, either 'lh' (left hemisphere) or 'rh' (right hemisphere).
+
+		Returns:
+		--------
+		data : numpy.ndarray
+			A 2D array of shape (N, M) containing surface metric values, where N is the number of vertices
+			in the cortical mask and M is the number of surfaces processed.
+		n_vertices : int
+			Total number of vertices in the original surface before masking.
+		affine : numpy.ndarray
+			The affine transformation matrix from the FreeSurfer MGH file.
+		header : nibabel.freesurfer.mghformat.MGHHeader
+			The header metadata from the MGH file.
+		bin_mask : numpy.ndarray
+			A 1D binary mask array indicating which vertices belong to the cortical mask.
+
+		Notes:
+		------
+		- The function loads the first surface file to determine the number of vertices and retrieve the affine and header.
+		- A binary mask is created based on the cortex label file for the given hemisphere.
+		- The mask is applied to extract only valid cortical vertex data.
+		- Data from all surface files is loaded and stored in a single array.
+		"""
+		assert hemisphere in ['lh', 'rh'], "Error: hemisphere must be either {lh, rh}"
+		surface = nib.freesurfer.mghformat.load(surfaces_path[0])
+		data = surface.get_fdata()[:,0,0]
+		n_vertices = data.shape[0]
+		affine = surface.affine
+		header = surface.header
+		mask_index = convert_fslabel('%s/%s.cortex.label' % (static_directory, hemisphere))[0]
+
+		bin_mask = np.zeros_like(data)
+		bin_mask[mask_index]=1
+		bin_mask = bin_mask.astype(int)
+		data = data[bin_mask == 1].astype(np.float32, order = "C")
+		all_data = np.zeros((bin_mask.sum(),len(surfaces_path)))
+		for s, surface_path in enumerate(surfaces_path):
+			temp = nib.freesurfer.mghformat.load(surface_path).get_fdata()[:,0,0]
+			all_data[:,s] = temp[bin_mask == 1].astype(np.float32, order = "C")
+		data = all_data.astype(np.float32, order = "C")
+		return(data, n_vertices, affine, header, bin_mask)
+
+	def build_freesurfer_surfaces_parallel(self, subjects, surface, subjects_dir, num_cores=12):
+		"""
+		Processes and builds FreeSurfer surface data in parallel for both hemispheres.
+
+		Parameters:
+		-----------
+		subjects : list of str
+			A list of subject IDs corresponding to directories within the FreeSurfer subjects directory.
+		surface : str
+			The surface metric to process. Must be either 'area' or 'thickness'.
+		subjects_dir : str
+			Path to the FreeSurfer subjects directory.
+		num_cores : int, optional
+			Number of CPU cores to use for parallel processing. Default is 12.
+
+		Returns:
+		--------
+		None
+
+		Attributes Set:
+		---------------
+		image_data_ : numpy.ndarray
+			Concatenated surface data for both hemispheres.
+		affine_ : list of numpy.ndarray
+			List containing affine transformation matrices for left and right hemispheres.
+		header_ : list of nibabel.freesurfer.mghformat.MGHHeader
+			List of headers for left and right hemispheres.
+		n_vertices_ : list of int
+			Number of vertices in the original surface before masking for each hemisphere.
+		mask_data_ : list of numpy.ndarray
+			Binary masks indicating valid cortical vertices for each hemisphere.
+
+		Notes:
+		------
+		- Calls `register_freesurfer_surfaces` to generate registered surface files.
+		- Loads processed surface files for left and right hemispheres.
+		- Uses `_process_freesurfer_surfaces_path_list` to extract relevant data.
+		- Stores processed data in instance attributes.
+		
+		"""
+		output_directory = register_freesurfer_surfaces(subjects = subjects, surface = surface, subjects_dir = None, num_cores = num_cores)
+		surfaces_lh_path = list(np.sort(glob(output_directory + "/lh*" + surface + ".03B.mgh")))
+		data_lh, n_vertices_lh, affine_lh, header_lh, bin_mask_lh = self._process_freesurfer_surfaces_path_list(surfaces_path = lh_surfaces,
+																																			hemisphere = 'lh')
+		surfaces_rh_path = list(np.sort(glob(output_directory + "/rh*" + surface + ".03B.mgh")))
+		data_rh, n_vertices_rh, affine_rh, header_rh, bin_mask_rh = self._process_freesurfer_surfaces_path_list(surfaces_path = rh_surfaces,
+																																			hemisphere = 'rh')
 		self.image_data_ = np.concatenate([data_lh, data_rh]).astype(np.float32, order = "C")
 		self.affine_ = [affine_lh, affine_rh]
 		self.header_ = [header_lh, header_rh]
 		self.n_vertices_ = [n_vertices_lh, n_vertices_rh]
 		self.mask_data_ = [bin_mask_lh, bin_mask_rh]
-		self.adjacency_ = adjacency
-		self.hemipheres_ = ['left-hemisphere', 'right-hemisphere']
 
 	def save(self, filename):
 		"""
