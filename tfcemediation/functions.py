@@ -32,10 +32,8 @@ from patsy import dmatrix
 from scipy.ndimage import label as scipy_label
 from scipy.ndimage import generate_binary_structure
 
-import matplotlib.cm as cm
-from matplotlib.colors import Normalize
+import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap
-from matplotlib.colorbar import ColorbarBase
 
 # get static resources
 scriptwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -486,7 +484,7 @@ class CorticalSurfaceImage:
 																																					hemisphere = 'rh')
 
 		if adjacency_lh_path is None and adjacency_rh_path is None:
-			adjacency = get_precompiled_freesurfer_adjacency(spatial_smoothing = 3)
+			adjacency = get_precompiled_freesurfer_adjacency(geodesic_distance = 3)
 
 		if surfaces_lh_path is None and surfaces_rh_path is None:
 			print("Surface files (scalars) not provided. Use build_freesurfer_surfaces_parallel if the files do not exist")
@@ -591,12 +589,22 @@ class CorticalSurfaceImage:
 		- Stores processed data in instance attributes.
 		
 		"""
+
+		if subjects_dir is None:
+			subjects_dir = os.environ.get('SUBJECTS_DIR')
+			if not subjects_dir:
+				raise EnvironmentError("SUBJECTS_DIR environment variable not set")
+			print("Using subjects_dir : %s" % subjects_dir)
+		assert os.path.exists(subjects_dir), "Error: subjects directory does not exist [%s]" % subjects_dir
+		assert surface in ['area','thickness'], "Error: surface [%s] must be either {area, thickness}" % surface
+		os.environ["SUBJECTS_DIR"] = subjects_dir
+		
 		output_directory = register_freesurfer_surfaces(subjects = subjects, surface = surface, subjects_dir = None, num_cores = num_cores)
 		surfaces_lh_path = list(np.sort(glob(output_directory + "/lh*" + surface + ".03B.mgh")))
-		data_lh, n_vertices_lh, affine_lh, header_lh, bin_mask_lh = self._process_freesurfer_surfaces_path_list(surfaces_path = lh_surfaces,
+		data_lh, n_vertices_lh, affine_lh, header_lh, bin_mask_lh = self._process_freesurfer_surfaces_path_list(surfaces_path = surfaces_lh_path,
 																																			hemisphere = 'lh')
 		surfaces_rh_path = list(np.sort(glob(output_directory + "/rh*" + surface + ".03B.mgh")))
-		data_rh, n_vertices_rh, affine_rh, header_rh, bin_mask_rh = self._process_freesurfer_surfaces_path_list(surfaces_path = rh_surfaces,
+		data_rh, n_vertices_rh, affine_rh, header_rh, bin_mask_rh = self._process_freesurfer_surfaces_path_list(surfaces_path = surfaces_rh_path,
 																																			hemisphere = 'rh')
 		self.image_data_ = np.concatenate([data_lh, data_rh]).astype(np.float32, order = "C")
 		self.affine_ = [affine_lh, affine_rh]
@@ -1378,7 +1386,7 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(max_pos, max_neg)
 
-	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, use_blocks = True, block_size = 384):
+	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, use_blocks = True, block_size = 768):
 		"""
 		Performs TFCE-based permutation testing for a given contrast index.
 		
@@ -1393,6 +1401,14 @@ class LinearRegressionModelMRI:
 			The number of permutations to perform.
 		whiten : bool, optional
 			Whether to whiten the residuals before permutation (default is True).
+		use_blocks : bool, default True
+			Whether to use blocks for the permutation analysis. At the end of each block parallel processing stops and restarts until the 
+			desired n_permutations is achieved. This is helpful for any memory leaks. There should be anymore memory leaks now. The default 
+			block_size is quite large at 768, so there's probably minimal impact on performance. That is, it is safer to use blocking.
+		block_size : int, default = 768
+			The number of permutations per block. The default size is set as dividable by many different number of cores such as 8, 6, 12, and 16.
+			The number of permuations (total) will automatically adjust (increase in size) so n_permutations % block_size = 0.
+			For example, 2000 permutations ==> 2304 (3 blocks) or 10000 permutaions ==> 10752 (14 blocks).
 		"""
 		assert hasattr(self, 'adjacency_set_'), "Run calculate_tstatistics_tfce first"
 		if self.memory_mapping_:
@@ -2535,13 +2551,11 @@ def _vertex_paint(positive_scalar, negative_scalar=None, vmin=0.95, vmax=1.0, ba
 	out_color_arr = np.ones((len(positive_scalar), 4), int) * 255
 	out_color_arr[:] = background_color_rbga
 	if np.sum(positive_scalar > vmin) != 0:
-		cnorm = Normalize(vmin=vmin, vmax=vmax)
 		cmap = ListedColormap(np.divide(pos_cmap_arr, 255))
 		mask = positive_scalar > vmin
 		vals = np.round(cmap(positive_scalar[mask]) * 255).astype(int)
 		out_color_arr[mask] = vals
 	if np.sum(negative_scalar > vmin) != 0:
-		cnorm = Normalize(vmin=vmin, vmax=vmax)
 		cmap = ListedColormap(np.divide(neg_cmap_arr, 255))
 		mask = negative_scalar > vmin
 		vals = np.round(cmap(negative_scalar[mask]) * 255).astype(int)
