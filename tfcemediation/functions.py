@@ -33,7 +33,7 @@ from scipy.ndimage import label as scipy_label
 from scipy.ndimage import generate_binary_structure
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap, ListedColormap
+from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
 
 # get static resources
 scriptwd = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
@@ -1306,7 +1306,76 @@ class LinearRegressionModelMRI:
 		self.tfce_E_ = float(E)
 		return(self)
 
-	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, mask_data, seed):
+	def create_permutation_block_from_df(self, stratification_variable):
+		"""
+		Creates a stratification array from the given variable in the DataFrame. 
+		Ensures that no more than 25% of the sample has unique values to avoid over-stratification.
+
+		Parameters
+		----------
+		stratification_variable : str
+			The categorical variable in the DataFrame columns (self.df_) used for stratification.
+
+		Raises
+		------
+		AssertionError
+			If self.df_ is missing.
+		AssertionError
+			If more than 25% of the sample has unique values.
+
+		Returns
+		----
+		stratification_arr : np.array
+			np.array of stratification groups
+		"""
+		assert hasattr(self, 'df_'), "Pandas dataframe is missing (self.df_) run load_pandas_dataframe or load_csv_dataframe first"
+		stratification_arr = np.array(self.df_[stratification_variable].values)
+		unique_variables = np.unique(stratification_arr)
+		assert np.divide(len(unique_variables), len(stratification_arr)) < 0.25, "Error: More than 25% of the sample has unique variables"
+		return(stratification_arr)
+
+	def _permute_stratified_blocks(self, stratification_arr, seed = None):
+		"""
+		Perform stratified permutation of indices, maintaining group structure.
+
+		Independently shuffles indices within each unique group defined by
+		'stratification_arr', preserving the original group locations while
+		randomizing order within groups.
+
+		Parameters
+		----------
+		stratification_arr : np.ndarray, shape (n,)
+			Categorical array defining group membership for each element.
+			Elements with the same value are considered part of the same group.
+		seed : int, optional
+			Seed for reproducible random permutations. Uses a randomly generated
+			seed from np.random.randint(0, 4294967295) when None (default).
+
+		Returns
+		-------
+		np.ndarray, shape (n,)
+			Array of indices permuted within stratification groups. Maintains:
+			1. Original group locations (same values at same positions)
+			2. All original indices appear exactly once
+			3. Within-group order is randomized
+
+		Notes
+		-----
+		- Sets numpy's global random seed during execution (via np.random.seed)
+		"""
+		if seed is None:
+			np.random.seed(np.random.randint(4294967295))
+		else:
+			np.random.seed(seed)
+		sorted_order = np.argsort(stratification_arr)
+		inv_perm = np.argsort(sorted_order)
+		_, counts = np.unique(stratification_arr[sorted_order], return_counts=True)
+		split_indices = np.cumsum(counts)[:-1]
+		chunks = np.split(sorted_order, split_indices)
+		permuted_sorted = np.concatenate([np.random.permutation(chunk) for chunk in chunks])
+		return(permuted_sorted[inv_perm])
+
+	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, mask_data, stratification_arr, seed):
 		"""
 		Runs a single TFCE-based permutation test.
 		
@@ -1342,7 +1411,10 @@ class LinearRegressionModelMRI:
 			np.random.seed(seed)
 		# Shuffle and compute regression
 		n, k = X.shape
-		tmp_X = np.random.permutation(X)
+		if stratification_arr is not None:
+			tmp_X = X[self._permute_stratified_blocks(stratification_arr)]
+		else:
+			tmp_X = np.random.permutation(X)
 		a = cy_lin_lstsqr_mat(tmp_X, y)
 		tmp_invXX = np.linalg.inv(np.dot(tmp_X.T, tmp_X))
 		tmp_sigma2 = np.divide(np.sum((y - np.dot(tmp_X, a))**2, axis=0), (n - k))
@@ -1386,7 +1458,7 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(max_pos, max_neg)
 
-	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, use_blocks = True, block_size = 768):
+	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, use_chunks = True, chunk_size = 768, stratification_blocks = None):
 		"""
 		Performs TFCE-based permutation testing for a given contrast index.
 		
@@ -1401,14 +1473,18 @@ class LinearRegressionModelMRI:
 			The number of permutations to perform.
 		whiten : bool, optional
 			Whether to whiten the residuals before permutation (default is True).
-		use_blocks : bool, default True
-			Whether to use blocks for the permutation analysis. At the end of each block parallel processing stops and restarts until the 
+		use_chunks : bool, default True
+			Whether to use chunks for the permutation analysis. At the end of each chunk parallel processing stops and restarts until the 
 			desired n_permutations is achieved. This is helpful for any memory leaks. There should be anymore memory leaks now. The default 
-			block_size is quite large at 768, so there's probably minimal impact on performance. That is, it is safer to use blocking.
-		block_size : int, default = 768
-			The number of permutations per block. The default size is set as dividable by many different number of cores such as 8, 6, 12, and 16.
-			The number of permuations (total) will automatically adjust (increase in size) so n_permutations % block_size = 0.
-			For example, 2000 permutations ==> 2304 (3 blocks) or 10000 permutaions ==> 10752 (14 blocks).
+			chunk_size is quite large at 768, so there's probably minimal impact on performance. That is, it is safer to use chunking.
+		chunk_size : int, default = 768
+			The number of permutations per chunk. The default size is set as dividable by many different number of cores such as 8, 6, 12, and 16.
+			The number of permuations (total) will automatically adjust (increase in size) so n_permutations % chunk_size = 0.
+			For example, 2000 permutations ==> 2304 (3 chunks) or 10000 permutaions ==> 10752 (14 chunks).
+		stratification_blocks : None or np.array (ndim =1), default None
+			Shuffling within unique value of stratification block. 
+			while still allowing for a valid assessment of the null hypothesis. This is particularly useful when controlling for confounding variables
+			or when dealing with clustered or hierarchical data.
 		"""
 		assert hasattr(self, 'adjacency_set_'), "Run calculate_tstatistics_tfce first"
 		if self.memory_mapping_:
@@ -1416,20 +1492,26 @@ class LinearRegressionModelMRI:
 			y = jload(self.memmap_y_name_, mmap_mode='r')
 		else:
 			y = self.y_
+		if stratification_blocks is not None:
+			stratification_blocks = np.array(stratification_blocks)
+			assert stratification_blocks.ndim == 1, "Error: stratification_blocks.ndim must equal 1"
 		if whiten:
 			y = y - self.predict(self.X_)
 		X = self.X_
-		if use_blocks:
+		
+
+
+		if use_chunks:
 			tfce_maximum_values = []
-			if not n_permutations % block_size == 0:
-				res = n_permutations % block_size
-				n_permutations += (block_size - res)
+			if not n_permutations % chunk_size == 0:
+				res = n_permutations % chunk_size
+				n_permutations += (chunk_size - res)
 			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			n_blocks = int(n_permutations/block_size)
-			for b in range(n_blocks):
-				print("Block[%d/%d]: %d Permutations" % (int(b+1), n_blocks, block_size))
-				seeds = generate_seeds(n_seeds = int(block_size/2))
-				block_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
+			n_chunks = int(n_permutations/chunk_size)
+			for b in range(n_chunks):
+				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
+				seeds = generate_seeds(n_seeds = int(chunk_size/2))
+				chunk_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
 														delayed(self._run_tfce_t_permutation)(i = i, 
 																						X = X,
 																						y = y, 
@@ -1438,8 +1520,9 @@ class LinearRegressionModelMRI:
 																						E = self.tfce_E_,
 																						adjacency_set = self.adjacency_set_,
 																						mask_data = self.mask_data_,
-																						seed = seeds[i]) for i in tqdm(range(int(block_size/2))))
-				tfce_maximum_values.append(block_tfce_maximum_values)
+																						stratification_arr = stratification_blocks,
+																						seed = seeds[i]) for i in tqdm(range(int(chunk_size/2))))
+				tfce_maximum_values.append(chunk_tfce_maximum_values)
 			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
 		else:
 			seeds = generate_seeds(n_seeds = int(n_permutations/2))
@@ -1454,6 +1537,7 @@ class LinearRegressionModelMRI:
 																					E = self.tfce_E_,
 																					adjacency_set = self.adjacency_set_,
 																					mask_data = self.mask_data_,
+																					stratification_arr = stratification_blocks,
 																					seed = seeds[i]) for i in tqdm(range(int(n_permutations/2))))
 			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
 		self.t_tfce_max_permutations_ = tfce_maximum_values
@@ -2547,18 +2631,18 @@ def _vertex_paint(positive_scalar, negative_scalar=None, vmin=0.95, vmax=1.0, ba
 		assert len(positive_scalar) == len(negative_scalar), "positive and negative scalar must have the same length"
 	pos_cmap_arr = get_cmap_array(positive_cmap)
 	neg_cmap_arr = get_cmap_array(negative_cmap)
-	
 	out_color_arr = np.ones((len(positive_scalar), 4), int) * 255
 	out_color_arr[:] = background_color_rbga
+	norm = Normalize(vmin, vmax)
 	if np.sum(positive_scalar > vmin) != 0:
 		cmap = ListedColormap(np.divide(pos_cmap_arr, 255))
 		mask = positive_scalar > vmin
-		vals = np.round(cmap(positive_scalar[mask]) * 255).astype(int)
+		vals = np.round(cmap(norm(positive_scalar[mask])) * 255).astype(int)
 		out_color_arr[mask] = vals
 	if np.sum(negative_scalar > vmin) != 0:
 		cmap = ListedColormap(np.divide(neg_cmap_arr, 255))
 		mask = negative_scalar > vmin
-		vals = np.round(cmap(negative_scalar[mask]) * 255).astype(int)
+		vals = np.round(cmap(norm(negative_scalar[mask])) * 255).astype(int)
 		out_color_arr[mask] = vals
 	return(out_color_arr)
 
