@@ -16,6 +16,7 @@ import re
 import nibabel as nib
 import numpy as np
 import pandas as pd
+import pyvista as pv
 
 from tqdm import tqdm
 from glob import glob
@@ -31,6 +32,7 @@ from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
 from patsy import dmatrix
 from scipy.ndimage import label as scipy_label
 from scipy.ndimage import generate_binary_structure
+from nibabel import gifti, cifti2
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
@@ -427,6 +429,86 @@ def register_freesurfer_surfaces(subjects, surface, subjects_dir = None, num_cor
 	return(tempdir)
 
 
+def load_surface_geometry(path_to_surface):
+	"""
+	Load surface geometry (vertices and faces) from various neuroimaging file formats.
+	
+	Parameters
+	----------
+	path_to_surface : str
+		Path to surface file. Supported formats:
+		- FreeSurfer (.srf)
+		- GIFTI (.surf.gii)
+		- CIFTI (.d*.nii)
+		- VTK (.vtk)
+	
+	Returns
+	-------
+	v : np.ndarray
+		Vertex coordinates (N, 3)
+	f : np.ndarray
+		Face connectivity indices (M, 3)
+	
+	Raises
+	------
+	ValueError
+		If file format is not supported or surface data cannot be extracted
+	"""
+	if not os.path.exists(path_to_surface):
+		raise FileNotFoundError("Surface file not found: [%s]" % path_to_surface)
+	ext = os.path.splitext(path_to_surface)[1].lower()
+
+	# extra checks for ext
+	if path_to_surface.endswith('.dtseries.nii') or path_to_surface.endswith('.dtseries.nii.gz'):
+		ext = '.dtseries.nii'
+	if path_to_surface.endswith('.dscalar.nii') or path_to_surface.endswith('.dscalar.nii.gz'):
+		ext = '.dscalar.nii'
+	if path_to_surface.endswith('.dlabel.nii') or path_to_surface.endswith('.dlabel.nii.gz'):
+		ext = '.dlabel.nii'
+	if ext == '.srf':
+		v, f = nib.freesurfer.io.read_geometry(path_to_surface)
+		return(v, f)
+	elif ext == '.gii':
+		gii = nib.load(path_to_surface)
+		v, f = None, None
+		for da in gii.darrays:
+			if da.intent == nib.nifti1.intent_codes['NIFTI_INTENT_POINTSET']:
+				v = da.data
+			elif da.intent == nib.nifti1.intent_codes['NIFTI_INTENT_TRIANGLE']:
+				f = da.data
+		if v is None or f is None:
+			raise ValueError("GIFTI file missing vertex or face data")
+		return(v, f)
+	elif ext in ('.dtseries.nii', '.dscalar.nii', '.dlabel.nii'):
+		if path_to_surface.endswith('.gz'):
+			outfile = 'tempfile.nii'
+			with gzip.open(path_to_surface, 'rb') as file_in:
+				with open(outfile, 'wb') as file_out:
+					shutil.copyfileobj(file_in, file_out)
+			cifti = nib.load(outfile)
+			os.remove(outfile)
+		else:
+			cifti = nib.load(path_to_surface)
+		for brain_model in cifti.header.get_axis(1).iter_structures():
+			print(brain_model)
+			if brain_model[0] == 'CIFTI_MODEL_TYPE_SURFACE':
+				v, f = brain_model[1].surface.surface_vertices, brain_model[1].surface.surface_faces
+				return(v, f)
+		raise ValueError("No surface data found in CIFTI file")
+	elif ext == '.vtk':
+		mesh = pv.read(path_to_surface)
+		v = mesh.points
+		f = mesh.faces.reshape(-1, 4)[:, 1:4]
+		return(v, f)
+	else:
+		print("Warning: attempting to load [%s] as freesurfer surface mesh" % path_to_surface)
+		try:
+			v, f = nib.freesurfer.io.read_geometry(path_to_surface)
+			return(v, f)
+		except:
+			raise ValueError("Unsupported surface file [%s] " % path_to_surface)
+
+
 class CorticalSurfaceImage:
 	"""
 	Represents a cortical surface image,masking them by non-zero data, and calculatign their adjacency for statistical analyses from FreeSurfer files. 
@@ -583,9 +665,9 @@ class CorticalSurfaceImage:
 
 		Notes:
 		------
-		- Calls `register_freesurfer_surfaces` to generate registered surface files.
+		- Calls 'register_freesurfer_surfaces' to generate registered surface files.
 		- Loads processed surface files for left and right hemispheres.
-		- Uses `_process_freesurfer_surfaces_path_list` to extract relevant data.
+		- Uses '_process_freesurfer_surfaces_path_list' to extract relevant data.
 		- Stores processed data in instance attributes.
 		
 		"""
@@ -648,6 +730,211 @@ class CorticalSurfaceImage:
 		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
 		with open(filename, 'rb') as f:
 			return pickle.load(f)
+
+
+class MultiSurfaceImage:
+	"""
+	MultiSurfaceImage is a ImageObjectMRI in that stores the scalar values and adjacency. Multiple surfaces can be included as once. 
+	It is possible to save and load the data classes as *.pkl objects. The masking and conversion to np.float32 substantially reduces the
+	file size and RAM requirements in large datasets.
+	"""
+
+	def __init__(self, *, generic_affine=np.array([[-1, 0, 0, 90], [0, 0, 1, -126], [0, -1, 0, 72], [0, 0, 0, 1]])):
+		"""
+		Initializes the MultiSurfaceImage instance.
+
+		Parameters
+		----------
+		generic_affine : np.ndarray, optional
+			The affine transformation matrix roughly in FreeSurfer space when an affine isn't provided.
+			Default is a standard FreeSurfer affine matrix.
+		"""
+		self.default_affine_ = generic_affine
+		self.image_data_ = []
+		self.affine_ = []
+		self.header_ = []
+		self.n_vertices_ = []
+		self.mask_data_ = []
+		self.adjacency_ = []
+		self.surface_names_ = []
+		self.n_subjects_ = None
+
+	def _check_surface(self, n_subjects):
+		"""
+		Ensures that all scalar data have the same number of subjects. Maybe more checks later... 
+
+		Parameters
+		----------
+		n_subjects : int
+			The number of subjects in the current dataset.
+
+		Raises
+		------
+		AssertionError
+			If the number of subjects does not match the previously stored number of subjects.
+		"""
+		if self.n_subjects_ is not None:
+			assert n_subjects == self.n_subjects_, "Error: all scalar data must have the same number of subjects"
+		else:
+			self.n_subjects_ = n_subjects
+
+	def _check_adjacency(self, adjacency):
+		"""
+		Validates and loads the adjacency matrix.
+
+		Parameters
+		----------
+		adjacency : str or np.ndarray
+			Either a file path to a .npy file containing the adjacency matrix or a NumPy array.
+
+		Returns
+		-------
+		np.ndarray
+			The loaded or validated adjacency matrix.
+
+		Raises
+		------
+		ValueError
+			If the adjacency is neither a string ending with .npy nor a NumPy array.
+		"""
+		if isinstance(adjacency, str) and os.path.splitext(adjacency.lower())[1] == '.npy':
+			return np.load(adjacency)
+		elif isinstance(adjacency, np.ndarray):
+			return adjacency
+		else:
+			raise ValueError("adjacency must be either a string ending with .npy or a NumPy array")
+
+	def import_scalar_data_freesurfer(self, surface_name, mgh_path, adjacency=None, path_to_surface=None):
+		"""
+		Imports scalar data from a FreeSurfer MGH file.
+
+		Parameters
+		----------
+		surface_name : str
+			Name of the surface (e.g., 'lh', 'rh').
+		mgh_path : str
+			Path to the FreeSurfer MGH file.
+		adjacency : str or np.ndarray, optional
+			Either a file path to a .npy file containing the adjacency matrix or a NumPy array.
+		path_to_surface : str, optional
+			Path to the FreeSurfer surface file (.srf) to compute adjacency if 'adjacency' is not provided.
+
+		Raises
+		------
+		AssertionError
+			If neither 'adjacency' nor 'path_to_surface' is provided, or if both are provided.
+		"""
+		assert (adjacency is None) != (path_to_surface is None), "Error: exactly one of adjacency or srf must be None"
+		scalar = nib.freesurfer.mghformat.load(mgh_path)
+		data = scalar.get_fdata()[:, 0, 0, :]
+		mask_data = np.zeros_like(data.mean(1))
+		mask_data[data.mean(1) != 0] = 1
+		n_vertices, n_subjects = data.shape
+		self._check_surface(n_subjects)
+		affine = scalar.affine
+		header = scalar.header
+		if adjacency is not None:
+			adjacency = self._check_adjacency(adjacency)
+		if path_to_surface is not None:
+			v, f = load_surface_geometry(path_to_surface)
+			adjacency = create_vertex_adjacency_neighbors(v, f)
+		self.surface_names_.append(surface_name)
+		self.image_data_.append(data[mask_data == 1].astype(np.float32, order = "C"))
+		self.affine_.append(affine)
+		self.header_.append(header)
+		self.n_vertices_.append(n_vertices)
+		self.mask_data_.append(mask_data)
+		self.adjacency_.append(adjacency)
+
+	def import_scalar_data_generic(self, surface_name, scalar_arr, adjacency=None, path_to_surface=None, affine=None, header=None):
+		"""
+		Imports scalar data from a generic NumPy array.
+
+		Parameters
+		----------
+		surface_name : str
+			Name of the surface (e.g., 'lh', 'rh').
+		scalar_arr : np.ndarray
+			Scalar data as a NumPy array.
+		adjacency : str or np.ndarray, optional
+			Either a file path to a .npy file containing the adjacency matrix or a NumPy array.
+		path_to_surface : str, optional
+			Path to the FreeSurfer surface file (.srf) to compute adjacency if 'adjacency' is not provided.
+		affine : np.ndarray, optional
+			Affine transformation matrix. If not provided, the default affine is used.
+		header : str, optional
+			Header information. If not provided, it is set to 'missing'.
+
+		Raises
+		------
+		AssertionError
+			If neither 'adjacency' nor 'path_to_surface' is provided, or if both are provided.
+		"""
+		assert (adjacency is None) != (path_to_surface is None), "Error: exactly one of adjacency or srf must be None"
+		data = scalar_arr
+		mask_data = np.zeros_like(data.mean(1))
+		mask_data[data.mean(1) != 0] = 1
+		n_vertices, n_subjects = data.shape
+		self._check_surface(n_subjects)
+		if adjacency is not None:
+			adjacency = self._check_adjacency(adjacency)
+		if path_to_surface is not None:
+			v, f = load_surface_geometry(path_to_surface)
+			adjacency = create_vertex_adjacency_neighbors(v, f)
+		if affine is None:
+			affine = self.default_affine_
+		if header is None:
+			header = 'missing'
+		self.surface_names_.append(surface_name)
+		self.image_data_.append(data[mask_data == 1].astype(np.float32, order = "C"))
+		self.affine_.append(affine)
+		self.header_.append(header)
+		self.n_vertices_.append(n_vertices)
+		self.mask_data_.append(mask_data)
+		self.adjacency_.append(adjacency)
+
+	def save(self, filename):
+		"""
+		Saves the MultiSurfaceImage instance as a pickle file.
+
+		Parameters
+		----------
+		filename : str
+			The name of the pickle file to be saved.
+
+		Raises
+		------
+		AssertionError
+			If the filename does not end with .pkl.
+		"""
+		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
+		with open(filename, 'wb') as f:
+			pickle.dump(self, f)
+
+	@classmethod
+	def load(cls, filename):
+		"""
+		Loads a MultiSurfaceImage instance from a pickle file.
+
+		Parameters
+		----------
+		filename : str
+			The name of the pickle file to load.
+
+		Returns
+		-------
+		MultiSurfaceImage
+			The loaded instance.
+
+		Raises
+		------
+		AssertionError
+			If the filename does not end with .pkl.
+		"""
+		assert filename.endswith(".pkl"), "filename must end with extension *.pkl"
+		with open(filename, 'rb') as f:
+			return pickle.load(f)
+
 
 class VoxelImage:
 	"""
@@ -1031,7 +1318,7 @@ class LinearRegressionModelMRI:
 			The formula that specifies which columns to include in the dummy coding (e.g., 'category1 + category2')
 		
 		save_columns_names : bool, optional, default=True
-			If True, stores the names of the dummy-coded columns in the object attribute `t_contrast_names_`
+			If True, stores the names of the dummy-coded columns in the object attribute 't_contrast_names_'
 		
 		scale_dummy_arr : bool, optional, default=True
 			If True, scales the resulting dummy variables (excluding the intercept column)
@@ -1053,14 +1340,14 @@ class LinearRegressionModelMRI:
 		"""
 		Print the indices of t-contrasts.
 
-		If the attribute `t_contrast_names_` exists, this function prints the index 
+		If the attribute 't_contrast_names_' exists, this function prints the index 
 		and corresponding contrast name. Otherwise, it prints the numeric indices 
 		for all available contrasts.
 
 		Parameters:
 		-----------
 		self : object
-			The instance containing `t_contrast_names_` and `t_` attributes.
+			The instance containing 't_contrast_names_' and 't_' attributes.
 		"""
 		if hasattr(self, 't_contrast_names_'):
 			for t in range(len(self.t_contrast_names_)):
@@ -1412,7 +1699,7 @@ class LinearRegressionModelMRI:
 		# Shuffle and compute regression
 		n, k = X.shape
 		if stratification_arr is not None:
-			tmp_X = X[self._permute_stratified_blocks(stratification_arr)]
+			tmp_X = X[self._permute_stratified_blocks(stratification_arr, seed = seed)]
 		else:
 			tmp_X = np.random.permutation(X)
 		a = cy_lin_lstsqr_mat(tmp_X, y)
@@ -1741,7 +2028,7 @@ class LinearRegressionModelMRI:
 		adjacency_set : list
 			A list defining adjacency relationships between data points, typically used for establishing neighborhood connections in the TFCE algorithm.
 		seed : int or None
-			The random seed for permutation. If `None`, a random seed will be selected.
+			The random seed for permutation. If 'None', a random seed will be selected.
 
 		Returns
 		-------
@@ -1782,7 +2069,7 @@ class LinearRegressionModelMRI:
 		Returns
 		-------
 		None
-			The function updates the `mediation_z_tfce_max_permutations_` attribute with the computed
+			The function updates the 'mediation_z_tfce_max_permutations_' attribute with the computed
 			maximum TFCE values across all permutations.
 		"""
 		assert hasattr(self, 'adjacency_set_'), "Run calculate_tstatistics_tfce first"
@@ -1949,8 +2236,8 @@ class LinearRegressionModelMRI:
 		Notes
 		-----
 		This function assumes that the permutation-based TFCE analysis has been run, and the
-		resulting data is available in `mediation_z_tfce_max_permutations_` and `mediation_z_tfce_`.
-		The function also calls `write_nibabel_image` to save the generated images.
+		resulting data is available in 'mediation_z_tfce_max_permutations_' and 'mediation_z_tfce_'.
+		The function also calls 'write_nibabel_image' to save the generated images.
 		"""
 		assert hasattr(self, 'mediation_z_tfce_max_permutations_'), "Run permute_mediation_z_tfce first"
 		contrast_name = "mediation_z"
@@ -1980,9 +2267,9 @@ class LinearRegressionModelMRI:
 		
 		Notes
 		-----
-		- The function assumes that `data_mask[0]` corresponds to the left hemisphere 
-		  and `data_mask[1]` corresponds to the right hemisphere.
-		- The `values` array should contain concatenated values for both hemispheres.
+		- The function assumes that 'data_mask[0]' corresponds to the left hemisphere 
+		  and 'data_mask[1]' corresponds to the right hemisphere.
+		- The 'values' array should contain concatenated values for both hemispheres.
 		- The output files will be saved as "<outname>.lh.mgh" and "<outname>.rh.mgh".
 		"""
 		if outname.endswith(".mgh"):
@@ -2148,7 +2435,7 @@ def linear_cm(c0, c1, c2=None):
 		A tuple or list of length 3 representing the RGB values of the middle color.
 	c2 : tuple or list, optional
 		A tuple or list of length 3 representing the RGB values of the ending color.
-		If not provided, the color map transitions directly from `c0` to `c1`.
+		If not provided, the color map transitions directly from 'c0' to 'c1'.
 
 	Returns:
 	--------
@@ -2179,7 +2466,7 @@ def log_cm(c0, c1, c2=None):
 		A tuple or list of length 3 representing the RGB values of the middle color.
 	c2 : tuple or list, optional
 		A tuple or list of length 3 representing the RGB values of the ending color.
-		If not provided, the color map transitions directly from `c0` to `c1`.
+		If not provided, the color map transitions directly from 'c0' to 'c1'.
 
 	Returns:
 	--------
@@ -2210,7 +2497,7 @@ def erf_cm(c0, c1, c2=None):
 		A tuple or list of length 3 representing the RGB values of the middle color.
 	c2 : tuple or list, optional
 		A tuple or list of length 3 representing the RGB values of the ending color.
-		If not provided, the color map transitions directly from `c0` to `c1`.
+		If not provided, the color map transitions directly from 'c0' to 'c1'.
 
 	Returns:
 	--------
@@ -2244,8 +2531,8 @@ def create_rywlbb_gradient_cmap(linear_alpha=False, return_array=True):
 	Returns:
 	--------
 	cmap_array : numpy.ndarray or matplotlib.colors.LinearSegmentedColormap
-		If `return_array` is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
-		If `return_array` is False, returns a matplotlib colormap object.
+		If 'return_array' is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
+		If 'return_array' is False, returns a matplotlib colormap object.
 	"""
 	colors = ["#00008C", "#2234A8", "#4467C4", "#659BDF", "#87CEFB", "white", "#ffec19", "#ffc100", "#ff9800", "#ff5607", "#f6412d"]
 	cmap = LinearSegmentedColormap.from_list("rywlbb-gradient", colors)
@@ -2279,8 +2566,8 @@ def create_ryw_gradient_cmap(linear_alpha=False, return_array=True):
 	Returns:
 	--------
 	cmap_array : numpy.ndarray or matplotlib.colors.LinearSegmentedColormap
-		If `return_array` is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
-		If `return_array` is False, returns a matplotlib colormap object.
+		If 'return_array' is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
+		If 'return_array' is False, returns a matplotlib colormap object.
 	"""
 	colors = ["white", "#ffec19", "#ffc100", "#ff9800", "#ff5607", "#f6412d"]
 	cmap = LinearSegmentedColormap.from_list("ryw-gradient", colors)
@@ -2314,8 +2601,8 @@ def create_lbb_gradient_cmap(linear_alpha=False, return_array=True):
 	Returns:
 	--------
 	cmap_array : numpy.ndarray or matplotlib.colors.LinearSegmentedColormap
-		If `return_array` is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
-		If `return_array` is False, returns a matplotlib colormap object.
+		If 'return_array' is True, returns a 2D array of shape (256, 4) representing the RGBA values of the colormap.
+		If 'return_array' is False, returns a matplotlib colormap object.
 	"""
 	colors = ["white", "#87CEFB", "#659BDF", "#4467C4", "#2234A8", "#00008C"]
 	cmap = LinearSegmentedColormap.from_list("lbb-gradient", colors)
@@ -2430,7 +2717,7 @@ def display_luts():
 
 	Notes
 	-----
-	- The function uses `matplotlib.pyplot` to render the colormaps.
+	- The function uses 'matplotlib.pyplot' to render the colormaps.
 	- Custom colormaps are defined using RGB values and are normalized to the range [0, 1].
 	- The function includes both linear and logarithmic colormaps.
 
@@ -2604,7 +2891,7 @@ def _vertex_paint(positive_scalar, negative_scalar=None, vmin=0.95, vmax=1.0, ba
 	positive_scalar : array
 		Array of positive scalar values for each vertex.
 	negative_scalar : array, optional
-		Array of negative scalar values for each vertex. If provided, it must have the same length as `positive_scalar`.
+		Array of negative scalar values for each vertex. If provided, it must have the same length as 'positive_scalar'.
 	vmin : float, optional
 		Minimum threshold value for applying colormap. Default is 0.95.
 	vmax : float, optional
@@ -2625,7 +2912,7 @@ def _vertex_paint(positive_scalar, negative_scalar=None, vmin=0.95, vmax=1.0, ba
 	-----
 	- If 'negative_scalar' is provided, it must have the same length as 'positive_scalar'.
 	- The function uses 'matplotlib.colors.Normalize' and 'ListedColormap' for color mapping.
-	- Vertices with scalar values below `vmin` are assigned the background color.
+	- Vertices with scalar values below 'vmin' are assigned the background color.
 	"""
 	if negative_scalar is not None:
 		assert len(positive_scalar) == len(negative_scalar), "positive and negative scalar must have the same length"
@@ -2670,15 +2957,15 @@ def write_cortical_surface_results_to_ply(positive_scalar_array, ImageObjectMRI,
 	outname : str
 		Output filename prefix for the generated PLY files.
 	negative_scalar_array : array, optional
-		Array of negative scalar values for each vertex. If provided, it must have the same length as `positive_scalar_array`.
+		Array of negative scalar values for each vertex. If provided, it must have the same length as 'positive_scalar_array'.
 	vmin : float, optional
 		Minimum threshold value for applying colormap. Default is 0.95.
 	vmax : float, optional
 		Maximum threshold value for applying colormap. Default is 1.0.
 	lh_srf_path : str, optional
-		Path to the left hemisphere surface file. Default is 'lh.midthickness.srf' in `static_directory`.
+		Path to the left hemisphere surface file. Default is 'lh.midthickness.srf' in 'static_directory'.
 	rh_srf_path : str, optional
-		Path to the right hemisphere surface file. Default is 'rh.midthickness.srf' in `static_directory`.
+		Path to the right hemisphere surface file. Default is 'rh.midthickness.srf' in 'static_directory'.
 	perform_surface_smoothing : bool, optional
 		Whether to apply surface smoothing before saving the PLY file. Default is True.
 	n_smoothing_iterations : int, optional
@@ -2724,4 +3011,78 @@ def write_cortical_surface_results_to_ply(positive_scalar_array, ImageObjectMRI,
 	outdata = np.ones((len(ImageObjectMRI.mask_data_[1]),4), int) * 255
 	outdata[ImageObjectMRI.mask_data_[1] == 1] = color_arr[np.sum(ImageObjectMRI.mask_data_[0] == 1):]
 	save_ply(v_rh, f_rh, outname[:-4] + ".rh.ply", color_array=outdata, output_binary=True)
+
+
+def plot_ply(path_to_ply, output_base, output_filetype='.svg'):
+	"""
+	Generates and saves orthogonal view plots of a 3D mesh from a PLY file.
+
+	Reads a PLY file containing a 3D mesh with RGB colors and saves six different
+	orthographic projections (axial superior, axial inferior, coronal posterior,
+	coronal anterior, sagittal right, sagittal left) as vector graphic files.
+
+	Parameters:
+		path_to_ply (str): Path to the input PLY file.
+		output_base (str): Base path for output files. If it ends with the
+			output_filetype extension, the extension is removed before appending
+			view-specific suffixes and the output_filetype.
+		output_filetype (str, optional): File format extension for saved images.
+			Must include the leading dot (e.g., '.svg', '.png'). Defaults to '.svg'.
+
+	Raises:
+		FileNotFoundError: If the input PLY file does not exist.
+		ValueError: If the mesh cannot be read or lacks RGB data.
+
+	Notes:
+		The output images are saved with suffixes indicating the view direction and 
+		anatomical orientation.
+	"""
+	if not output_filetype.startswith('.'):
+		output_filetype = '.' + output_filetype
+	if output_base.endswith(output_filetype):
+		output_base = output_base.split(output_filetype)[0]
+
+	mesh = pv.read(path_to_ply)
+
+	plotter = pv.Plotter(off_screen=True, window_size=(2000, 2000))
+	plotter.add_mesh(
+		mesh,
+		scalars='RGB',
+		rgb=True,
+		show_scalar_bar=False,
+	)
+
+	# Axial views (superior and inferior)
+	plotter.view_xy(negative=False, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_axial_superior" + output_filetype)
+
+	plotter.view_xy(negative=True, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_axial_inferior" + output_filetype)
+
+	# Coronal views (posterior and anterior)
+	plotter.view_xz(negative=False, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_coronal_posterior" + output_filetype)
+
+	plotter.view_xz(negative=True, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_coronal_anterior" + output_filetype)
+
+	# Sagittal views (right and left)
+	plotter.view_yz(negative=False, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_sagittal_right" + output_filetype)
+
+	plotter.view_yz(negative=True, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_sagittal_left" + output_filetype)
+
+	plotter.close()
+
+
+
+
+
 
