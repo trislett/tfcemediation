@@ -3103,11 +3103,14 @@ def generate_orthographic_snapshot_ply(path_to_ply, output_base, output_filetype
 	coronal anterior, sagittal right, sagittal left) as vector graphic files.
 
 	Parameters:
-		path_to_ply (str): Path to the input PLY file.
-		output_base (str): Base path for output files. If it ends with the
+		path_to_ply : str
+			Path to the input PLY file. (vtk is probably fine too as long as you have RGB data)
+		output_base : str
+			Base path for output files. If it ends with the
 			output_filetype extension, the extension is removed before appending
 			view-specific suffixes and the output_filetype.
-		output_filetype (str, optional): File format extension for saved images.
+		output_filetype : str, optional
+			File format extension for saved images.
 			Must include the leading dot (e.g., '.svg', '.png'). Defaults to '.svg'.
 
 	Raises:
