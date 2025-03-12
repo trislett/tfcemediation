@@ -3013,7 +3013,88 @@ def write_cortical_surface_results_to_ply(positive_scalar_array, ImageObjectMRI,
 	save_ply(v_rh, f_rh, outname[:-4] + ".rh.ply", color_array=outdata, output_binary=True)
 
 
-def plot_ply(path_to_ply, output_base, output_filetype='.svg'):
+def interactive_surface_viewer(path_to_surface, positive_scalar_array, negative_scalar_array = None, scalar_mask = None, vmin = 0.95, vmax = 1.0, perform_surface_smoothing = True, n_smoothing_iterations = 100, background_color_rbga=[220, 210, 195, 255], positive_cmap='red-yellow', negative_cmap='blue-lightblue', plot_render = False):
+
+	"""
+	Visualize surface data with interactive 3D rendering using scalar arrays for color mapping.
+
+	Loads a surface mesh, optionally smooths it, and visualizes positive/negative scalar arrays
+	using specified colormaps. Supports masking of scalar application and background customization.
+
+	Parameters
+	----------
+	path_to_surface : str
+		Path to surface geometry file. The following are acceptable formats:
+			- FreeSurfer (.srf)
+			- GIFTI (.surf.gii)
+			- CIFTI (.d*.nii)
+			- VTK (.vtk)
+	positive_scalar_array : array-like
+		1D array of positive scalar values for contrast visualization.
+	negative_scalar_array : array-like, optional
+		1D array of negative scalar values for contrast visualization.
+	scalar_mask : array-like, optional
+		Boolean mask specifying which vertices to apply colors to (1=apply, 0=background).
+	vmin : float, optional
+		Minimum value for scalar normalization (default: 0.95).
+	vmax : float, optional
+		Maximum value for scalar normalization (default: 1.0).
+	perform_surface_smoothing : bool, optional
+		Enable surface smoothing using Laplacian smoothing (default: True).
+	n_smoothing_iterations : int, optional
+		Number of smoothing iterations (default: 100).
+	background_color_rbga : list, optional
+		Background color as [R, G, B, A] (0-255) (default: [220, 210, 195, 255]).
+	positive_cmap : str, optional
+		Colormap name for positive values (default: 'red-yellow').
+	negative_cmap : str, optional
+		Colormap name for negative values (default: 'blue-lightblue').
+	plot_render : bool, optional
+		Immediately display the plot (default: False).
+
+	Returns
+	-------
+	None
+
+	Notes
+	-----
+	- Surface smoothing uses lambda_w=0.5 with weighted Laplacian smoothing
+	- Face arrays are converted to PyVista's triangular mesh format (n_faces, 3, vertex_indices)
+
+	Example
+	-------
+	>>> interactive_surface_viewer(path_to_surface = os.path.join(static_directory, 'lh.midthickness.srf'),
+								positive_scalar_array = 1minusP_scalar,
+								scalar_mask = ImageObjectMRI.mask_data_[0],
+								vmin=0.95, vmax=1.0,
+								positive_cmap='red-yellow',
+								plot_render=True)
+	"""
+
+
+	v, f = load_surface_geometry(path_to_surface)
+	if perform_surface_smoothing:
+		v, f = vectorized_surface_smoothing(v, f, number_of_iter = n_smoothing_iterations, lambda_w = 0.5, use_taubin = False, weighted = True)
+	f_new = np.column_stack((np.ones((len(f)))*3, f)).astype(int)
+	mesh = pv.PolyData(v, f_new)
+	if scalar_mask is None:
+		scalar_mask = np.ones((len(v)))
+	outdata = np.ones((len(scalar_mask),4), int) * 255
+	color_arr = _vertex_paint(positive_scalar = positive_scalar_array,
+										negative_scalar = negative_scalar_array,
+										vmin = vmin, vmax = vmax,
+										background_color_rbga = background_color_rbga,
+										positive_cmap = positive_cmap,
+										negative_cmap = negative_cmap)
+	outdata[scalar_mask == 1] = color_arr
+	mesh.point_data["RGB"] = outdata
+	plotter = pv.Plotter()
+	plotter.add_mesh(mesh, scalars='RGB', rgb=True, show_scalar_bar=False)
+	if plot_render:
+		plotter.show()
+		plotter.close()
+
+def generate_orthographic_snapshot_ply(path_to_ply, output_base, output_filetype='.svg'):
 	"""
 	Generates and saves orthogonal view plots of a 3D mesh from a PLY file.
 
@@ -3056,7 +3137,6 @@ def plot_ply(path_to_ply, output_base, output_filetype='.svg'):
 	plotter.view_xy(negative=False, render=False)
 	plotter.reset_camera()
 	plotter.save_graphic(output_base + "_axial_superior" + output_filetype)
-
 	plotter.view_xy(negative=True, render=False)
 	plotter.reset_camera()
 	plotter.save_graphic(output_base + "_axial_inferior" + output_filetype)
@@ -3065,7 +3145,6 @@ def plot_ply(path_to_ply, output_base, output_filetype='.svg'):
 	plotter.view_xz(negative=False, render=False)
 	plotter.reset_camera()
 	plotter.save_graphic(output_base + "_coronal_posterior" + output_filetype)
-
 	plotter.view_xz(negative=True, render=False)
 	plotter.reset_camera()
 	plotter.save_graphic(output_base + "_coronal_anterior" + output_filetype)
@@ -3074,11 +3153,9 @@ def plot_ply(path_to_ply, output_base, output_filetype='.svg'):
 	plotter.view_yz(negative=False, render=False)
 	plotter.reset_camera()
 	plotter.save_graphic(output_base + "_sagittal_right" + output_filetype)
-
 	plotter.view_yz(negative=True, render=False)
 	plotter.reset_camera()
 	plotter.save_graphic(output_base + "_sagittal_left" + output_filetype)
-
 	plotter.close()
 
 
