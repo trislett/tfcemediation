@@ -32,7 +32,6 @@ from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
 from patsy import dmatrix
 from scipy.ndimage import label as scipy_label
 from scipy.ndimage import generate_binary_structure
-from nibabel import gifti, cifti2
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
@@ -2193,7 +2192,7 @@ class LinearRegressionModelMRI:
 		else:
 			contrast_name = "tvalue-con%d" % np.arange(0, len(self.t_),1)[int(contrast_index)]
 
-		if not hasattr(self, 't_tfce_positive_oneminusp_')
+		if not hasattr(self, 't_tfce_positive_oneminusp_'):
 			self.t_tfce_positive_oneminusp_ = np.zeros_like(self.t_tfce_positive_)
 			self.t_tfce_negative_oneminusp_ = np.zeros_like(self.t_tfce_negative_)
 
