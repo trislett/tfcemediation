@@ -1288,7 +1288,7 @@ class LinearRegressionModelMRI:
 			This method does not return anything, it assigns the DataFrame to the object attribute.
 		"""
 		assert isinstance(df, pd.DataFrame), "df must be a pandas dataframe"
-		self.df_ = df
+		self.dataframe_ = df
 
 	def load_csv_dataframe(self, csv_file):
 		"""
@@ -1305,9 +1305,9 @@ class LinearRegressionModelMRI:
 			This method does not return anything, it assigns the DataFrame to the object attribute.
 		"""
 		assert csv_file.endswith(".csv"), "csv_file end with .csv"
-		self.df_ = pd.read_csv(csv_file)
+		self.dataframe_ = pd.read_csv(csv_file)
 
-	def dummy_code_from_formula(self, formula_like, save_columns_names = True, scale_dummy_arr = True):
+	def dummy_code_from_formula(self, formula_like, save_columns_names = True, scale_dummy_arr = True, return_columns_names = False):
 		"""
 		Creates dummy-coded variables using patsy from the DataFrame and optionally scales them
 		
@@ -1315,25 +1315,31 @@ class LinearRegressionModelMRI:
 		----------
 		formula_like : str
 			The formula that specifies which columns to include in the dummy coding (e.g., 'category1 + category2')
-		
 		save_columns_names : bool, optional, default=True
 			If True, stores the names of the dummy-coded columns in the object attribute 't_contrast_names_'
-		
 		scale_dummy_arr : bool, optional, default=True
 			If True, scales the resulting dummy variables (excluding the intercept column)
+		return_columns_names : bool, default=False
+			Special case in which the column names are also returned (dummy_arr, columns_names)
 		
 		Returns
 		---------
-		np.ndarray
+		np.ndarray (if return_columns_names=True (np.ndarray, list)
 			The scaled dummy-coded variables as a numpy array, with the intercept column excluded
 		"""
-		assert hasattr(self, 'df_'), "Pandas dataframe is missing (self.df_) run load_pandas_dataframe or load_csv_dataframe first"
-		df_dummy = dmatrix(formula_like, data=self.df_, NA_action="raise", return_type='dataframe')
+		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
+		df_dummy = dmatrix(formula_like, data=self.dataframe_, NA_action="raise", return_type='dataframe')
 		if save_columns_names:
 			colnames =  df_dummy.columns.values
 			self.t_contrast_names_ = np.array([sanitize_columns(col) for col in colnames])
+			self.exogenous_variable_formula_ = formula_like
 		dummy_arr = scale_arr(df_dummy.values[:,1:])
-		return(dummy_arr)
+		if return_columns_names:
+			colnames =  df_dummy.columns.values
+			columns_names = np.array([sanitize_columns(col) for col in colnames])
+			return(dummy_arr, columns_names)
+		else:
+			return(dummy_arr)
 
 	def print_t_contrast_indices(self):
 		"""
@@ -1353,6 +1359,60 @@ class LinearRegressionModelMRI:
 				print("[index=%d] ==> %s" % (t, self.t_contrast_names_[t]))
 		else:
 			print(np.arange(self.t_.shape[0]))
+
+	def fit_from_formula(self, exogenous_formula, y):
+		"""
+		Fit the linear regression model to the data.
+
+		Parameters
+		----------
+		X : np.ndarray, shape(n_samples, n_features)
+			Exogneous variables
+		
+		y : np.ndarray or str, shape(n_samples, n_dependent_variables) or 'mapped'
+			Endogenous variables
+
+		Returns
+		-------
+		self : object
+			Fitted model instance.
+		"""
+		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
+		X = self.dummy_code_from_formula(formula_like = exogenous_formula, save_columns_names = True)
+		if isinstance(y, str):
+			if y == 'mapped':
+				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
+				y = jload(self.memmap_y_name_, mmap_mode='r')
+		X, y = self._check_inputs(X, y)
+		if not hasattr(self, 'memmap_y_name_'): # confusing: checks for memory mapped y, 
+			if self.memory_mapping_:
+				data_filename_memmap = "memmap_y_%d" % int(time.time())
+				if self.use_tmp_:
+					data_filename_memmap = os.path.join(self.tmp_directory_, data_filename_memmap)
+				else:
+					data_filename_memmap = os.path.abspath(data_filename_memmap)
+				self.memmap_y_name_ = data_filename_memmap
+				dump(y, data_filename_memmap)
+				y = jload(data_filename_memmap, mmap_mode='r')
+		if self.fit_intercept_:
+			if np.mean(X[:,0]) != 1:
+				X = self._stack_ones(X)
+		n, k = X.shape # n_samples, rank
+		df_between = k - 1
+		df_within = n - k
+		df_total = n - 1
+		a = cy_lin_lstsqr_mat(X, y)
+		leverage = (X * np.linalg.pinv(X).T).sum(1).reshape(-1,1)
+		self.X_ = X 
+		self.y_ = y
+		self.n_ = n
+		self.k_ = k
+		self.df_between_ = df_between
+		self.df_within_ = df_within
+		self.df_total_ = df_total
+		self.coef_ = a
+		self.leverage_ = leverage
+		return(self)
 	
 	def fit(self, X, y):
 		"""
@@ -1600,12 +1660,12 @@ class LinearRegressionModelMRI:
 		Parameters
 		----------
 		stratification_variable : str
-			The categorical variable in the DataFrame columns (self.df_) used for stratification.
+			The categorical variable in the DataFrame columns (self.dataframe_) used for stratification.
 
 		Raises
 		------
 		AssertionError
-			If self.df_ is missing.
+			If self.dataframe_ is missing.
 		AssertionError
 			If more than 25% of the sample has unique values.
 
@@ -1614,8 +1674,8 @@ class LinearRegressionModelMRI:
 		stratification_arr : np.array
 			np.array of stratification groups
 		"""
-		assert hasattr(self, 'df_'), "Pandas dataframe is missing (self.df_) run load_pandas_dataframe or load_csv_dataframe first"
-		stratification_arr = np.array(self.df_[stratification_variable].values)
+		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
+		stratification_arr = np.array(self.dataframe_[stratification_variable].values)
 		unique_variables = np.unique(stratification_arr)
 		assert np.divide(len(unique_variables), len(stratification_arr)) < 0.25, "Error: More than 25% of the sample has unique variables"
 		return(stratification_arr)
@@ -1857,6 +1917,34 @@ class LinearRegressionModelMRI:
 				self.f_qvalues_ = fdrcorrection(self.f_pvalues_)[1]
 		return(self)
 
+	def f_to_z_wilson_hilfert(self, f_stats, df1):
+		"""
+		Wilson-Hilferty approximation of Z from F.
+		
+		Args:
+			f_stats: NumPy array of F-statistic values (must be non-negative).
+			df1: Numerator degrees of freedom (scalar).
+
+		Returns:
+			NumPy array of approximate Z-statistics.
+		"""
+		f_stats = np.asarray(f_stats)
+		if not isinstance(df1, int) or df1 <= 0:
+			raise ValueError("df1 must be a positive integer")
+
+		# Calculate constants first
+		nine_df1 = 9.0 * df1
+		term2 = 1.0 - (2.0 / nine_df1)
+		term3_sq_inv = nine_df1 / 2.0 # Calculate 1/term3^2
+		term3_inv = np.sqrt(term3_sq_inv) # Calculate 1/term3
+
+		with np.errstate(invalid='ignore'):
+			term1 = np.power(f_stats, 1.0/3.0)
+			z_approx = (term1 - term2) * term3_inv
+			# Ensure negative F-stats result in Z-stat = 0
+			z_approx[f_stats < 0] = 0
+		return(z_approx)
+
 	def _calculate_beta_se(self, exog, endog, index_var = -1):
 		"""
 		Calculate the standard error for the coefficients using linear regression.
@@ -1932,7 +2020,7 @@ class LinearRegressionModelMRI:
 		self : object
 			Fitted model with mediation z-scores and p-values.
 		"""
-		assert hasattr(self, 'df_'), "Pandas dataframe is missing (self.df_) run load_pandas_dataframe or load_csv_dataframe first"
+		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
 		not_none_count = sum(val is not None for val in (X, M, y))
 		assert not_none_count == 2, "Two of X, M, and y must not be None"
 		if X is not None:
@@ -2086,7 +2174,7 @@ class LinearRegressionModelMRI:
 																				seed = seeds[i]) for i in tqdm(range(n_permutations)))
 		self.mediation_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
 
-	def outlier_detection(self, f_quantile = 0.99, cooks_distance_threshold = None, low_ram = True):
+	def outlier_detection(self, f_quantile = 0.99, low_ram = True, outlier_tolerance_count = 2):
 		"""
 		Detect outliers using Cook's distance. Cook's distance is defined as the coefficient vector would move 
 		if the sample were removed and the model refit.
@@ -2095,8 +2183,8 @@ class LinearRegressionModelMRI:
 		----------
 		f_quantile : float
 			The threshold for identifying outliers using the F-distribution.
-		cooks_distance_threshold : float
-			Manually, set the threshold for outliers.
+		outlier_tolerance_count : int, default outlier_tolerance_count=2.
+			The cutoff for the allowable number of outliers (i.e., outlier subjects). The percentage outlier will also be calculated.
 		low_ram : bool, default = True
 			Deletes self.residual_studentized_ and self.cooks_distance_ to save RAM
 		
@@ -2116,15 +2204,97 @@ class LinearRegressionModelMRI:
 			self.mse_ = np.divide(self.sse_, self.df_within_)
 		self.residuals_studentized_ = np.divide(np.divide(self.residuals_, np.sqrt(self.mse_)), np.sqrt(1 - self.leverage_))
 		self.cooks_distance_ = np.divide(self.residuals_studentized_**2, self.k_) * np.divide(self.leverage_, (1 -  self.leverage_))
-		if cooks_distance_threshold is None:
-			self.cooks_distance_threshold_ = fdist.ppf(f_quantile, self.df_between_, self.df_within_, loc=self.cooks_distance_.mean(0), scale=self.cooks_distance_.std(0))
-		else:
-			self.cooks_distance_threshold_ = cooks_distance_threshold
+		self.cooks_distance_threshold_ = fdist.ppf(f_quantile, self.k_, (self.n_ - self.k_))
 		self.n_outliers_ = (self.cooks_distance_ > self.cooks_distance_threshold_).sum(0)
 		self.n_outliers_percentage_ = np.divide(self.n_outliers_ * 100, self.n_)
+		self.outlier_ = np.zeros((len(self.n_outliers_)), int)
+		self.outlier_[self.n_outliers_ > outlier_tolerance_count] = 1
 		if low_ram:
 			del self.residuals_studentized_ 
 			del self.cooks_distance_
+		return(self)
+
+	def compare_reduced_model(self, reduced_formula, calculate_effect_size = False, calculate_probability = True, estimate_z_statistic = True, return_F_value = False):
+		"""
+		Compare a reduced model to the full model using an F-test and compute effect size measures.
+
+		This function evaluates the difference between a full model ('self.X_') and a reduced model specified by 'reduced_formula' 
+		by computing the F-statistic, partial eta squared, and adjusted partial eta squared based on the method described by Mordkoff.
+
+		Parameters
+		----------
+		reduced_formula : str
+			Formula specifying the reduced model design matrix. Must have fewer predictors than 'self.X_' and the same number of observations.
+		calculate_effect_size : bool, optional
+			If True, computes partial eta squared and partial omega squared effect sizes. Default is False.
+		calculate_probability : bool, optional
+			If True, computes p-values for the F-statistic and applies FDR correction if 'self.fdr_correction_' is enabled. Default is True.
+		estimate_z_statistic : bool, optional
+			If True, estimates the z-statistic using the F-to-z conversion. Default is True.
+		return_F_value : bool, optional
+			If True, returns the F-value directly rather than storing it as an attribute. Default is False.
+
+		Attributes
+		----------
+		self.model_compare_f_ : float
+			The F-statistic comparing the reduced and full models.
+		self.model_compare_partial_eta_sq_ : float
+			Partial eta squared (\(\eta^2_p\)), a measure of effect size.
+		self.model_compare_partial_omega_sq_ : float
+			Partial omega squared (\(\omega^2_p\)), an unbiased estimator of effect size.
+		self.model_compare_z_ : float, optional
+			The z-statistic derived from the F-statistic (only if 'estimate_z_statistic=True').
+		self.model_compare_f_pvalues_ : float, optional
+			P-value associated with the F-statistic (only if 'calculate_probability=True').
+		self.model_compare_f_qvalues_ : float, optional
+			FDR-corrected p-value (only if 'self.fdr_correction_' is enabled and 'calculate_probability=True').
+
+		Raises
+		------
+		AssertionError
+			If 'reduced_formula' results in a design matrix with more predictors than or a different number of observations than 'self.X_'.
+
+		Returns
+		-------
+		float or ModelCompare instance
+			If 'return_F_value' is True, returns the F-value directly. Otherwise, returns self to allow method chaining.
+		"""
+		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
+		assert hasattr(self, 't_contrast_names_'), "Contrast names are missing. Try first running: X = self.dummy_code_from_formula(formula_like = exogenous_formula, save_columns_names = True) or self.fit_from_formula(exogenous_formula, y)"
+		Xreduced, columns_names = self.dummy_code_from_formula(reduced_formula, save_columns_names = False, scale_dummy_arr = True, return_columns_names = True)
+		for col in columns_names:
+			assert col in self.t_contrast_names_, "Reduced %s must be in full formula {%s}" % (col, self.exogenous_variable_formula_)
+		if self.fit_intercept_:
+			if np.mean(Xreduced[:,0]) != 1:
+				Xreduced = self._stack_ones(Xreduced)
+		assert self.X_.shape[1] > Xreduced.shape[1], "Xreduced must have a lower rank that the full model X"
+		assert self.X_.shape[0] == Xreduced.shape[0], "Xreduced must have the same number of subjects as the full model X"
+		coef_reduced = cy_lin_lstsqr_mat(Xreduced, self.y_)
+		y_pred_full = self.predict(self.X_)
+		y_pred_reduced = np.dot(Xreduced, coef_reduced)
+		rss_full = np.sum((self.y_ - y_pred_full) ** 2, 0)
+		rss_reduced = np.sum((self.y_ - y_pred_reduced) ** 2, 0)
+		N = self.X_.shape[0]
+		k = self.X_.shape[1]
+		df_num = self.X_.shape[1] - Xreduced.shape[1] # df_effect
+		df_den = self.X_.shape[0] - self.X_.shape[1] # df_error
+		if return_F_value:
+			Fvalues = ((rss_reduced - rss_full) / df_num) / (rss_full / df_den)
+			return(Fvalues)
+		else:
+			self.model_compare_f_ = ((rss_reduced - rss_full) / df_num) / (rss_full / df_den)
+		if estimate_z_statistic:
+			self.model_compare_z_ = self.f_to_z_wilson_hilfert(self.model_compare_f_, df_num)
+		if calculate_effect_size:
+			self.model_compare_partial_eta_sq_ = (rss_reduced - rss_full) / rss_reduced
+			omega_sq_p_num = df_num * (self.model_compare_f_ - 1)
+			omega_sq_p_den = omega_sq_p_num + N
+			self.model_compare_partial_omega_sq_ = np.divide(omega_sq_p_num, omega_sq_p_den)
+			self.model_compare_partial_omega_sq_ = np.clip(self.model_compare_partial_omega_sq_, 0, 1)
+		if calculate_probability:
+			self.model_compare_f_pvalues_ = fdist.sf(self.model_compare_f_, df_num, df_den)
+			if self.fdr_correction_:
+				self.model_compare_f_qvalues_ = fdrcorrection(self.model_compare_f_pvalues_)[1]
 		return(self)
 
 	def predict(self, X):
