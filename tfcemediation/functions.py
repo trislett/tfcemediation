@@ -24,7 +24,7 @@ from joblib import Parallel, delayed, wrap_non_picklable_objects, dump
 from joblib import load as jload
 from statsmodels.stats.multitest import fdrcorrection
 from scipy.stats import t as tdist, f as fdist
-from scipy.stats import norm
+from scipy.stats import norm, chi2
 from scipy.special import erf
 from tfcemediation.tfce import CreateAdjSet
 from tfcemediation.adjacency import compute
@@ -2199,12 +2199,13 @@ class LinearRegressionModelMRI:
 			del self.cooks_distance_
 		return(self)
 
-	def compare_reduced_model(self, reduced_formula, calculate_effect_size = False, calculate_probability = True, estimate_z_statistic = True):
+	def nested_model(self, reduced_formula, calculate_effect_size = False, calculate_probability = True, calculate_log_ratio_test = False, estimate_z_statistic = True):
 		"""
-		Compare a reduced model to the full model using an F-test and compute effect size measures.
+		Compare a reduced model to the full model using an F-test and optionally LRT, and compute effect sizes.
 
-		This function evaluates the difference between a full model ('self.X_') and a reduced model specified by 'reduced_formula' 
-		by computing the F-statistic, partial eta squared, and partial omega squared (less biased).
+		This function evaluates the difference between a full model (based on 'self.X_') and a reduced model specified by 'reduced_formula'.
+		It computes the F-statistic for model comparison. Optionally, it calculates effect sizes (partial eta-squared, partial omega-squared),
+		p-values, z-statistics derived from the F-statistic, and performs a Likelihood Ratio Test (LRT).
 
 		Parameters
 		----------
@@ -2214,32 +2215,60 @@ class LinearRegressionModelMRI:
 			If True, computes partial eta squared and partial omega squared effect sizes. Default is False.
 		calculate_probability : bool, optional
 			If True, computes p-values for the F-statistic and applies FDR correction if 'self.fdr_correction_' is enabled. Default is True.
+		calculate_log_ratio_test : bool, optional
+			If True, computes the Likelihood Ratio Test statistic (Chi-squared), associated p-value,
+			and related information criteria (AIC, BIC) for both models. Default is False.
 		estimate_z_statistic : bool, optional
 			If True, estimates the z-statistic using the F-to-z conversion. Default is True.
 
 		Attributes
 		----------
-		self.model_compare_f_ : float
-			The F-statistic comparing the reduced and full models.
-		self.model_compare_partial_eta_sq_ : float
-			Partial eta squared (\(\eta^2_p\)), a measure of effect size.
-		self.model_compare_partial_omega_sq_ : float
-			Partial omega squared (\(\omega^2_p\)), an unbiased estimator of effect size.
-		self.model_compare_z_ : float, optional
-			The z-statistic derived from the F-statistic (only if 'estimate_z_statistic=True').
-		self.model_compare_f_pvalues_ : float, optional
-			P-value associated with the F-statistic (only if 'calculate_probability=True').
-		self.model_compare_f_qvalues_ : float, optional
-			FDR-corrected p-value (only if 'self.fdr_correction_' is enabled and 'calculate_probability=True').
+		model_compare_f_ : numpy.ndarray
+			The F-statistic comparing the reduced and full models for each dependent variable.
+		model_compare_df_num_ : int
+			Numerator degrees of freedom for the F-test (difference in number of predictors).
+		model_compare_df_den_ : int
+			Denominator degrees of freedom for the F-test (observations - predictors in full model).
+		model_compare_Xreduced_ : numpy.ndarray
+			The design matrix for the reduced model.
+		model_compare_partial_eta_sq_ : numpy.ndarray, optional
+			Partial eta squared (\(\eta^2_p\)), a measure of effect size. Only set if `calculate_effect_size=True`.
+		model_compare_partial_omega_sq_ : numpy.ndarray, optional
+			Partial omega squared (\(\omega^2_p\)), an unbiased estimator of effect size. Only set if `calculate_effect_size=True`.
+		model_compare_z_ : numpy.ndarray, optional
+			The z-statistic derived from the F-statistic. Only set if `estimate_z_statistic=True`.
+		model_compare_f_pvalues_ : numpy.ndarray, optional
+			P-value associated with the F-statistic. Only set if `calculate_probability=True`.
+		model_compare_f_qvalues_ : numpy.ndarray, optional
+			FDR-corrected p-value for the F-statistic. Only set if `self.fdr_correction_` is enabled and `calculate_probability=True`.
+		log_likelihood_ : numpy.ndarray, optional
+			Log-likelihood of the full model. Only set if `calculate_log_ratio_test=True`.
+		aic_ : numpy.ndarray, optional
+			Akaike Information Criterion for the full model. Only set if `calculate_log_ratio_test=True`.
+		bic_ : numpy.ndarray, optional
+			Bayesian Information Criterion for the full model. Only set if `calculate_log_ratio_test=True`.
+		log_likelihood_reduced_ : numpy.ndarray, optional
+			Log-likelihood of the reduced model. Only set if `calculate_log_ratio_test=True`.
+		aic_reduced_ : numpy.ndarray, optional
+			Akaike Information Criterion for the reduced model. Only set if `calculate_log_ratio_test=True`.
+		bic_reduced_ : numpy.ndarray, optional
+			Bayesian Information Criterion for the reduced model. Only set if `calculate_log_ratio_test=True`.
+		log_ratio_chi2_ : numpy.ndarray, optional
+			Likelihood Ratio Test statistic (-2 * (LL_reduced - LL_full)), distributed as Chi-squared. Only set if `calculate_log_ratio_test=True`.
+		log_ratio_chi2_pvalues_ : numpy.ndarray, optional
+			P-value associated with the Likelihood Ratio Test statistic. Only set if `calculate_log_ratio_test=True`.
 
 		Raises
 		------
 		AssertionError
+			If 'self.dataframe_' or 'self.t_contrast_names_' are missing.
 			If 'reduced_formula' results in a design matrix with more predictors than or a different number of observations than 'self.X_'.
+			If predictors in the reduced model are not a subset of the full model predictors.
 
 		Returns
 		-------
 		self
+			The instance itself, allowing for method chaining.
 		"""
 		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
 		assert hasattr(self, 't_contrast_names_'), "Contrast names are missing. Try first running: X = self.dummy_code_from_formula(formula_like = exogenous_formula, save_columns_names = True) or self.fit_from_formula(exogenous_formula, y)"
@@ -2258,29 +2287,44 @@ class LinearRegressionModelMRI:
 		rss_reduced = np.sum((self.y_ - y_pred_reduced) ** 2, 0)
 		df_num = self.X_.shape[1] - Xreduced.shape[1] # df_effect
 		df_den = self.X_.shape[0] - self.X_.shape[1] # df_error
-		N = self.X_.shape[0]
+		num_observations = self.X_.shape[0]
 		self.model_compare_f_ = ((rss_reduced - rss_full) / df_num) / (rss_full / df_den)
 		if estimate_z_statistic:
 			self.model_compare_z_ = self.f_to_z_wilson_hilfert(self.model_compare_f_, df_num)
 		if calculate_effect_size:
 			self.model_compare_partial_eta_sq_ = (rss_reduced - rss_full) / rss_reduced
 			omega_sq_p_num = df_num * (self.model_compare_f_ - 1)
-			omega_sq_p_den = omega_sq_p_num + N
+			omega_sq_p_den = omega_sq_p_num + num_observations
 			self.model_compare_partial_omega_sq_ = np.divide(omega_sq_p_num, omega_sq_p_den)
 			self.model_compare_partial_omega_sq_ = np.clip(self.model_compare_partial_omega_sq_, 0, 1)
 		if calculate_probability:
 			self.model_compare_f_pvalues_ = fdist.sf(self.model_compare_f_, df_num, df_den)
 			if self.fdr_correction_:
 				self.model_compare_f_qvalues_ = fdrcorrection(self.model_compare_f_pvalues_)[1]
+		if calculate_log_ratio_test:
+			k_full = self.X_.shape[1] + 1
+			k_reduced = Xreduced.shape[1] + 1
+			self.log_likelihood_ = -num_observations/2 * (np.log(2 * np.pi) + np.log(rss_full / num_observations) + 1)
+			self.aic_ = 2 * k_full - 2 * self.log_likelihood_
+			self.bic_ = k_full * np.log(num_observations) - 2 * self.log_likelihood_
+			self.log_likelihood_reduced_ = -num_observations/2 * (np.log(2 * np.pi) + np.log(rss_reduced / num_observations) + 1)
+			self.aic_reduced_ = 2 * k_reduced - 2 * self.log_likelihood_reduced_
+			self.bic_reduced_ = k_reduced * np.log(num_observations) - 2 * self.log_likelihood_reduced_
+			self.log_ratio_chi2_ = -2*(self.log_likelihood_reduced_ - self.log_likelihood_)
+			self.log_ratio_chi2_pvalues_ = chi2.sf(self.log_ratio_chi2_, df_num)
 		self.model_compare_Xreduced_ = Xreduced
 		self.model_compare_df_num_ = df_num
 		self.model_compare_df_den_ = df_den
 		return(self)
 
-	def calculate_compare_reduced_model_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67):
+
+
+
+
+	def calculate_nested_model_z_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67):
 		"""
 		Computes Threshold-Free Cluster Enhancement (TFCE) for the approximate z-statistics 
-		from the difference between the full and reduced model (compare_reduced_model).
+		from the difference between the full and reduced model (nested_model).
 
 		This function applies the TFCE algorithm to enhance statistical maps 
 		by accounting for spatial adjacency relationships, improving sensitivity 
@@ -2312,7 +2356,7 @@ class LinearRegressionModelMRI:
 		  using a surface-based approach.
 		- Otherwise, a voxel-based TFCE computation is performed using adjacency sets.
 		"""
-		assert hasattr(self, 'model_compare_z_tfce_'), "Run compare_reduced_model first with estimate_z_statistic = True"
+		assert hasattr(self, 'model_compare_z_'), "Run nested_model first with estimate_z_statistic = True"
 		assert hasattr(ImageObjectMRI, 'adjacency_'), "ImageObjectMRI is missing adjacency_"
 		self.model_compare_z_tfce_ = np.zeros((self.model_compare_z_.shape)).astype(np.float32, order = "C")
 
@@ -2338,9 +2382,9 @@ class LinearRegressionModelMRI:
 		self.tfce_E_ = float(E)
 		return(self)
 
-	def _run_compare_reduced_model_tfce_permutation(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed):
+	def _run_nested_z_tfce_permutation(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed):
 		"""
-		Runs a single TFCE-based permutation test on estimated z statistic from compare_reduced_model.
+		Runs a single TFCE-based permutation test on estimated z statistic from nested_model.
 		
 		This function shuffles the data, computes z-statistic, and applies the TFCE algorithm.
 		
@@ -2433,7 +2477,7 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(max_pos)
 
-	def permute_model_comparison_tfce(self, n_permutations, whiten = True, use_chunks = True, chunk_size = 768, stratification_blocks = None):
+	def permute_nested_model_tfce(self, n_permutations, whiten = True, use_chunks = True, chunk_size = 768, stratification_blocks = None):
 		"""
 		Performs TFCE-based permutation testing for a given contrast index.
 		
@@ -2463,7 +2507,7 @@ class LinearRegressionModelMRI:
 		----------
 			None.
 		"""
-		assert hasattr(self, 'adjacency_set_'), "Run calculate_compare_reduced_model_tfce first"
+		assert hasattr(self, 'adjacency_set_'), "Run calculate_nested_model_z_tfce first"
 		if self.memory_mapping_:
 			assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
 			y = jload(self.memmap_y_name_, mmap_mode='r')
@@ -2488,7 +2532,7 @@ class LinearRegressionModelMRI:
 				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
 				seeds = generate_seeds(n_seeds = int(chunk_size))
 				chunk_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-														delayed(self._run_compare_reduced_model_tfce_permutation)(i = i,
+														delayed(self._run_nested_z_tfce_permutation)(i = i,
 																						X = X,
 																						Xreduced = Xreduced,
 																						y = y,
@@ -2505,7 +2549,7 @@ class LinearRegressionModelMRI:
 			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
 			seeds = generate_seeds(n_seeds = int(n_permutations))
 			tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-														delayed(self._run_compare_reduced_model_tfce_permutation)(i = i,
+														delayed(self._run_nested_z_tfce_permutation)(i = i,
 																						X = X,
 																						Xreduced = Xreduced,
 																						y = y,
