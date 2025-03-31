@@ -577,7 +577,7 @@ class CorticalSurfaceImage:
 			self.mask_data_ = [bin_mask_lh, bin_mask_rh]
 		
 		self.adjacency_ = adjacency
-		self.hemipheres_ = ['left-hemisphere', 'right-hemisphere']
+		self.hemispheres_ = ['left-hemisphere', 'right-hemisphere']
 
 	def _process_freesurfer_surfaces_path_list(self, surfaces_path, hemisphere):
 		"""
@@ -1324,7 +1324,7 @@ class LinearRegressionModelMRI:
 		
 		Returns
 		---------
-		np.ndarray (if return_columns_names=True (np.ndarray, list)
+		np.ndarray (if return_columns_names=True (np.ndarray, list))
 			The scaled dummy-coded variables as a numpy array, with the intercept column excluded
 		"""
 		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
@@ -1332,7 +1332,9 @@ class LinearRegressionModelMRI:
 		if save_columns_names:
 			colnames =  df_dummy.columns.values
 			self.t_contrast_names_ = np.array([sanitize_columns(col) for col in colnames])
-			self.exogenous_variable_formula_ = formula_like
+			if not self.fit_intercept_:
+				self.t_contrast_names_ = self.t_contrast_names_[1:]
+			self.exogenous_variables_formula_ = formula_like
 		dummy_arr = scale_arr(df_dummy.values[:,1:])
 		if return_columns_names:
 			colnames =  df_dummy.columns.values
@@ -1360,67 +1362,47 @@ class LinearRegressionModelMRI:
 		else:
 			print(np.arange(self.t_.shape[0]))
 
-	def fit_from_formula(self, exogenous_formula, y):
-		"""
-		Fit the linear regression model to the data.
+	def _handle_y_memmapping(self, y):
+		"""Handles loading or creating memory-mapped y array."""
+		if isinstance(y, str) and y == 'mapped':
+			if not hasattr(self, 'memmap_y_name_') or self.memmap_y_name_ is None:
+				raise FileNotFoundError("No memory mapped endogenous variables found. 'y' was 'mapped' but self.memmap_y_name_ is not set.")
+			if not os.path.exists(self.memmap_y_name_):
+				raise FileNotFoundError(f"Memory mapped file not found: {self.memmap_y_name_}")
+			print(f"Loading memory mapped y from: {self.memmap_y_name_}")
+			return(jload(self.memmap_y_name_, mmap_mode='r'))
 
-		Parameters
-		----------
-		X : np.ndarray, shape(n_samples, n_features)
-			Exogneous variables
-		
-		y : np.ndarray or str, shape(n_samples, n_dependent_variables) or 'mapped'
-			Endogenous variables
+		# If y is not 'mapped', check if we *should* map it
+		y_checked = np.asarray(y) # Ensure it's an array first
+		if self.memory_mapping_ and (not hasattr(self, 'memmap_y_name_') or self.memmap_y_name_ is None):
+			timestamp = int(time.time() * 1000) # Use milliseconds for uniqueness
+			data_filename_memmap = f"memmap_y_{timestamp}.mmap"
 
-		Returns
-		-------
-		self : object
-			Fitted model instance.
-		"""
-		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
-		X = self.dummy_code_from_formula(formula_like = exogenous_formula, save_columns_names = True)
-		if isinstance(y, str):
-			if y == 'mapped':
-				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
-				y = jload(self.memmap_y_name_, mmap_mode='r')
-		X, y = self._check_inputs(X, y)
-		if not hasattr(self, 'memmap_y_name_'): # confusing: checks for memory mapped y, 
-			if self.memory_mapping_:
-				data_filename_memmap = "memmap_y_%d" % int(time.time())
-				if self.use_tmp_:
-					data_filename_memmap = os.path.join(self.tmp_directory_, data_filename_memmap)
-				else:
-					data_filename_memmap = os.path.abspath(data_filename_memmap)
-				self.memmap_y_name_ = data_filename_memmap
-				dump(y, data_filename_memmap)
-				y = jload(data_filename_memmap, mmap_mode='r')
-		if self.fit_intercept_:
-			if np.mean(X[:,0]) != 1:
-				X = self._stack_ones(X)
-		n, k = X.shape # n_samples, rank
-		df_between = k - 1
-		df_within = n - k
-		df_total = n - 1
-		a = cy_lin_lstsqr_mat(X, y)
-		leverage = (X * np.linalg.pinv(X).T).sum(1).reshape(-1,1)
-		self.X_ = X 
-		self.y_ = y
-		self.n_ = n
-		self.k_ = k
-		self.df_between_ = df_between
-		self.df_within_ = df_within
-		self.df_total_ = df_total
-		self.coef_ = a
-		self.leverage_ = leverage
-		return(self)
-	
+			if self.use_tmp_:
+				filepath = os.path.join(self.tmp_directory_, data_filename_memmap)
+			else:
+				filepath = os.path.abspath(data_filename_memmap)
+
+			# Ensure the directory exists
+			os.makedirs(os.path.dirname(filepath), exist_ok=True)
+
+			self.memmap_y_name_ = filepath
+			print(f"Creating memory mapped y at: {self.memmap_y_name_}")
+			dump(y_checked, self.memmap_y_name_)
+			# Return the loaded memory-mapped array
+			return(jload(self.memmap_y_name_, mmap_mode='r'))
+		else:
+			# If not mapping or already mapped, return the original (or checked) y
+			return(y_checked)
+
 	def fit(self, X, y):
 		"""
-		Fit the linear regression model to the data.
+		Fit the linear regression model to the data. X can be a np.ndarray or a patsy-like formula (e.g., X='age + sex + site + diagnosis'). If using a
+		a formula, make to to load a pandas dataframe first using load_pandas_dataframe or load_csv_dataframe.
 
 		Parameters
 		----------
-		X : np.ndarray, shape(n_samples, n_features)
+		X : np.ndarray or str, shape(n_samples, n_features) or formula_like
 			Exogneous variables
 		
 		y : np.ndarray or str, shape(n_samples, n_dependent_variables) or 'mapped'
@@ -1431,21 +1413,12 @@ class LinearRegressionModelMRI:
 		self : object
 			Fitted model instance.
 		"""
-		if isinstance(y, str):
-			if y == 'mapped':
-				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
-				y = jload(self.memmap_y_name_, mmap_mode='r')
+		if isinstance(X, str):
+			assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
+			X = self.dummy_code_from_formula(formula_like = X, save_columns_names = True)
+			self.print_t_contrast_indices()
+		y = self._handle_y_memmapping(y)
 		X, y = self._check_inputs(X, y)
-		if not hasattr(self, 'memmap_y_name_'): # confusing: checks for memory mapped y, 
-			if self.memory_mapping_:
-				data_filename_memmap = "memmap_y_%d" % int(time.time())
-				if self.use_tmp_:
-					data_filename_memmap = os.path.join(self.tmp_directory_, data_filename_memmap)
-				else:
-					data_filename_memmap = os.path.abspath(data_filename_memmap)
-				self.memmap_y_name_ = data_filename_memmap
-				dump(y, data_filename_memmap)
-				y = jload(data_filename_memmap, mmap_mode='r')
 		if self.fit_intercept_:
 			if np.mean(X[:,0]) != 1:
 				X = self._stack_ones(X)
@@ -1500,7 +1473,7 @@ class LinearRegressionModelMRI:
 					self.t_qvalues_[c] = fdrcorrection(self.t_pvalues_[c])[1]
 		return(self)
 
-	def _calculate_surface_tfce(self, mask_data, statistic, adjacency_set, H = 2.0, E = 0.67, return_max_tfce = False):
+	def _calculate_surface_tfce(self, mask_data, statistic, adjacency_set, H = 2.0, E = 0.67, return_max_tfce = False, only_positive_contrast = False):
 		"""
 		Computes the TFCE (Threshold-Free Cluster Enhancement) statistic for surface-based data.
 		
@@ -1549,28 +1522,40 @@ class LinearRegressionModelMRI:
 			out_statistic_positive[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
 			out_statistic_positive[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
 
-		vertStat_TFCE_lh.fill(0)
-		vertStat_TFCE_rh.fill(0)
-
-		calcTFCE_lh.run(-vertStat_out_lh, vertStat_TFCE_lh)
-		calcTFCE_rh.run(-vertStat_out_rh, vertStat_TFCE_rh)
-
-		if return_max_tfce:
-			out_statistic_negative = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
+		if only_positive_contrast:
+			adjacency_set = None
+			vertStat_out_lh = None
+			vertStat_out_rh = None
+			vertStat_TFCE_lh = None
+			vertStat_TFCE_rh = None
+			calcTFCE_lh = None
+			calcTFCE_rh = None
+			del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
+			gc.collect()
+			return(out_statistic_positive)
 		else:
-			out_statistic_negative = np.zeros_like(statistic).astype(np.float32, order = "C")
-			out_statistic_negative[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
-			out_statistic_negative[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
-		adjacency_set = None
-		vertStat_out_lh = None
-		vertStat_out_rh = None
-		vertStat_TFCE_lh = None
-		vertStat_TFCE_rh = None
-		calcTFCE_lh = None
-		calcTFCE_rh = None
-		del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
-		gc.collect()
-		return(out_statistic_positive, out_statistic_negative)
+			vertStat_TFCE_lh.fill(0)
+			vertStat_TFCE_rh.fill(0)
+
+			calcTFCE_lh.run(-vertStat_out_lh, vertStat_TFCE_lh)
+			calcTFCE_rh.run(-vertStat_out_rh, vertStat_TFCE_rh)
+
+			if return_max_tfce:
+				out_statistic_negative = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
+			else:
+				out_statistic_negative = np.zeros_like(statistic).astype(np.float32, order = "C")
+				out_statistic_negative[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
+				out_statistic_negative[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
+			adjacency_set = None
+			vertStat_out_lh = None
+			vertStat_out_rh = None
+			vertStat_TFCE_lh = None
+			vertStat_TFCE_rh = None
+			calcTFCE_lh = None
+			calcTFCE_rh = None
+			del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
+			gc.collect()
+			return(out_statistic_positive, out_statistic_negative)
 
 	def calculate_tstatistics_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67, contrast = None):
 		"""
@@ -1621,7 +1606,7 @@ class LinearRegressionModelMRI:
 		if contrast is not None:
 			iterator_ = [iterator_[contrast]]
 
-		if hasattr(ImageObjectMRI, 'hemipheres_'):
+		if hasattr(ImageObjectMRI, 'hemispheres_'):
 			for c in iterator_:
 				if np.sum(self.t_[c] > 0) < 100 or np.sum(self.t_[c] < 0) < 100:
 					print("The t-statistic is in the same direction for almost all vertices. Skipping TFCE calculation for Contrast-%d" % (c))
@@ -1652,7 +1637,7 @@ class LinearRegressionModelMRI:
 		self.tfce_E_ = float(E)
 		return(self)
 
-	def create_permutation_block_from_df(self, stratification_variable):
+	def create_permutation_block_from_dataframe(self, stratification_variable):
 		"""
 		Creates a stratification array from the given variable in the DataFrame. 
 		Ensures that no more than 25% of the sample has unique values to avoid over-stratification.
@@ -2214,12 +2199,12 @@ class LinearRegressionModelMRI:
 			del self.cooks_distance_
 		return(self)
 
-	def compare_reduced_model(self, reduced_formula, calculate_effect_size = False, calculate_probability = True, estimate_z_statistic = True, return_F_value = False):
+	def compare_reduced_model(self, reduced_formula, calculate_effect_size = False, calculate_probability = True, estimate_z_statistic = True):
 		"""
 		Compare a reduced model to the full model using an F-test and compute effect size measures.
 
 		This function evaluates the difference between a full model ('self.X_') and a reduced model specified by 'reduced_formula' 
-		by computing the F-statistic, partial eta squared, and adjusted partial eta squared based on the method described by Mordkoff.
+		by computing the F-statistic, partial eta squared, and partial omega squared (less biased).
 
 		Parameters
 		----------
@@ -2231,8 +2216,6 @@ class LinearRegressionModelMRI:
 			If True, computes p-values for the F-statistic and applies FDR correction if 'self.fdr_correction_' is enabled. Default is True.
 		estimate_z_statistic : bool, optional
 			If True, estimates the z-statistic using the F-to-z conversion. Default is True.
-		return_F_value : bool, optional
-			If True, returns the F-value directly rather than storing it as an attribute. Default is False.
 
 		Attributes
 		----------
@@ -2256,14 +2239,13 @@ class LinearRegressionModelMRI:
 
 		Returns
 		-------
-		float or ModelCompare instance
-			If 'return_F_value' is True, returns the F-value directly. Otherwise, returns self to allow method chaining.
+		self
 		"""
 		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
 		assert hasattr(self, 't_contrast_names_'), "Contrast names are missing. Try first running: X = self.dummy_code_from_formula(formula_like = exogenous_formula, save_columns_names = True) or self.fit_from_formula(exogenous_formula, y)"
 		Xreduced, columns_names = self.dummy_code_from_formula(reduced_formula, save_columns_names = False, scale_dummy_arr = True, return_columns_names = True)
 		for col in columns_names:
-			assert col in self.t_contrast_names_, "Reduced %s must be in full formula {%s}" % (col, self.exogenous_variable_formula_)
+			assert col in self.t_contrast_names_, "Reduced %s must be in full formula {%s}" % (col, self.exogenous_variables_formula_)
 		if self.fit_intercept_:
 			if np.mean(Xreduced[:,0]) != 1:
 				Xreduced = self._stack_ones(Xreduced)
@@ -2274,15 +2256,10 @@ class LinearRegressionModelMRI:
 		y_pred_reduced = np.dot(Xreduced, coef_reduced)
 		rss_full = np.sum((self.y_ - y_pred_full) ** 2, 0)
 		rss_reduced = np.sum((self.y_ - y_pred_reduced) ** 2, 0)
-		N = self.X_.shape[0]
-		k = self.X_.shape[1]
 		df_num = self.X_.shape[1] - Xreduced.shape[1] # df_effect
 		df_den = self.X_.shape[0] - self.X_.shape[1] # df_error
-		if return_F_value:
-			Fvalues = ((rss_reduced - rss_full) / df_num) / (rss_full / df_den)
-			return(Fvalues)
-		else:
-			self.model_compare_f_ = ((rss_reduced - rss_full) / df_num) / (rss_full / df_den)
+		N = self.X_.shape[0]
+		self.model_compare_f_ = ((rss_reduced - rss_full) / df_num) / (rss_full / df_den)
 		if estimate_z_statistic:
 			self.model_compare_z_ = self.f_to_z_wilson_hilfert(self.model_compare_f_, df_num)
 		if calculate_effect_size:
@@ -2295,7 +2272,251 @@ class LinearRegressionModelMRI:
 			self.model_compare_f_pvalues_ = fdist.sf(self.model_compare_f_, df_num, df_den)
 			if self.fdr_correction_:
 				self.model_compare_f_qvalues_ = fdrcorrection(self.model_compare_f_pvalues_)[1]
+		self.model_compare_Xreduced_ = Xreduced
+		self.model_compare_df_num_ = df_num
+		self.model_compare_df_den_ = df_den
 		return(self)
+
+	def calculate_compare_reduced_model_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67):
+		"""
+		Computes Threshold-Free Cluster Enhancement (TFCE) for the approximate z-statistics 
+		from the difference between the full and reduced model (compare_reduced_model).
+
+		This function applies the TFCE algorithm to enhance statistical maps 
+		by accounting for spatial adjacency relationships, improving sensitivity 
+		in neuroimaging analyses.
+
+		Parameters
+		----------
+		ImageObjectMRI : object
+			An instance containing neuroimaging data, including adjacency 
+			information and mask data.
+		H : float, optional
+			The height exponent for TFCE computation (default is 2.0).
+		E : float, optional
+			The extent exponent for TFCE computation (default is 0.67).
+		Raises
+		------
+		AssertionError
+			If the z-statistics have not been computed before running TFCE.
+		
+		Returns
+		-------
+		self : object
+			The instance with updated attributes containing the computed 
+			TFCE-enhanced t-statistics for both positive and negative contrasts.
+		
+		Notes
+		-----
+		- If 'ImageObjectMRI' has a 'hemispheres_' attribute, TFCE is computed 
+		  using a surface-based approach.
+		- Otherwise, a voxel-based TFCE computation is performed using adjacency sets.
+		"""
+		assert hasattr(self, 'model_compare_z_tfce_'), "Run compare_reduced_model first with estimate_z_statistic = True"
+		assert hasattr(ImageObjectMRI, 'adjacency_'), "ImageObjectMRI is missing adjacency_"
+		self.model_compare_z_tfce_ = np.zeros((self.model_compare_z_.shape)).astype(np.float32, order = "C")
+
+		if hasattr(ImageObjectMRI, 'hemispheres_'):
+			tfce_values =  self._calculate_surface_tfce(mask_data = ImageObjectMRI.mask_data_,
+																		statistic = self.model_compare_z_.astype(np.float32, order = "C"),
+																		adjacency_set = ImageObjectMRI.adjacency_,
+																		H = H, E = E, return_max_tfce = False,
+																		only_positive_contrast = True)
+			self.model_compare_z_tfce_ = tfce_values
+		else:
+			calcTFCE = CreateAdjSet(H, E, ImageObjectMRI.adjacency_) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
+			zval = self.model_compare_z_
+			stat = zval.astype(np.float32, order = "C")
+			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+			calcTFCE.run(stat, stat_TFCE)
+			self.model_compare_z_tfce_ = stat_TFCE
+
+		# for permutation testing
+		self.adjacency_set_ = ImageObjectMRI.adjacency_
+		self.mask_data_ = ImageObjectMRI.mask_data_
+		self.tfce_H_ = float(H)
+		self.tfce_E_ = float(E)
+		return(self)
+
+	def _run_compare_reduced_model_tfce_permutation(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed):
+		"""
+		Runs a single TFCE-based permutation test on estimated z statistic from compare_reduced_model.
+		
+		This function shuffles the data, computes z-statistic, and applies the TFCE algorithm.
+		
+		Parameters
+		----------
+		i : int
+			The permutation index.
+		X : numpy.ndarray
+			The design matrix for the regression model.
+		Xreduced : numpy.ndarray
+			The reduced design matrix for the regression model.
+		y : numpy.ndarray
+			The response variable.
+		H : float
+			The height exponent for TFCE computation.
+		E : float
+			The extent exponent for TFCE computation.
+		adjacency_set : list
+			A set defining adjacency relationships between data points.
+		stratification_arr : list
+			A list defining stratification blocks for permutation testing
+		seed : int or None
+			The random seed for permutation.
+		
+		Returns
+		-------
+		tuple
+			The maximum TFCE values.
+		"""
+		if seed is None:
+			np.random.seed(np.random.randint(4294967295))
+		else:
+			np.random.seed(seed)
+
+		assert X.shape[1] > Xreduced.shape[1], "Xreduced must have a lower rank that the full model X"
+		assert X.shape[0] == Xreduced.shape[0], "Xreduced must have the same number of subjects as the full model X"
+
+		if stratification_arr is not None:
+			perm_idx = self._permute_stratified_blocks(stratification_arr, seed = seed)
+		else:
+			perm_idx = np.random.permutation(np.arange(X.shape[0]))
+		tmp_X = X[perm_idx]
+		tmp_Xreduced = Xreduced[perm_idx]
+
+		tmp_coef = cy_lin_lstsqr_mat(tmp_X, y)
+		tmp_coef_reduced = cy_lin_lstsqr_mat(tmp_Xreduced, y)
+		tmp_y_pred_full = np.dot(tmp_X, tmp_coef)
+		tmp_y_pred_reduced = np.dot(tmp_Xreduced, tmp_coef_reduced)
+		tmp_rss_full = np.sum((y - tmp_y_pred_full) ** 2, 0)
+		tmp_rss_reduced = np.sum((y - tmp_y_pred_reduced) ** 2, 0)
+		tmp_df1 = tmp_X.shape[1] - tmp_Xreduced.shape[1]
+		tmp_df2 = tmp_X.shape[0] - tmp_X.shape[1]
+		temp_f = ((tmp_rss_reduced - tmp_rss_full) / tmp_df1) / (tmp_rss_full / tmp_df2)
+		stat = self.f_to_z_wilson_hilfert(temp_f, tmp_df1).astype(np.float32, order = "C")
+
+		# Unlink variable from memory
+		a = None
+		tmp_X = None
+		tmp_Xreduced = None
+		tmp_coef = None
+		tmp_coef_reduced = None
+		tmp_rss_full = None
+		tmp_rss_reduced = None
+		tmp_df1 = None
+		tmp_df2 = None
+		temp_f = None
+		del a, tmp_X, tmp_Xreduced, tmp_coef, tmp_coef_reduced, tmp_rss_full, tmp_rss_reduced, tmp_df1, tmp_df2, temp_f # this is probably redundant, but won't hurt...
+
+		if len(adjacency_set) == 2:
+			max_pos = self._calculate_surface_tfce(mask_data = mask_data,
+																		statistic = stat,
+																		adjacency_set = adjacency_set,
+																		H = H, E = E, return_max_tfce = True,
+																		only_positive_contrast = True)
+		else:
+			# Compute TFCE
+			perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+			perm_calcTFCE.run(stat, stat_TFCE)
+			max_pos = stat_TFCE.max()
+			perm_calcTFCE = None
+			stat_TFCE = None
+		X = None
+		Xreduced = None
+		y = None
+		stat = None
+		adjacency_set = None
+		mask_data = None
+		del adjacency_set, stat, mask_data, X, Xreduced, y
+		gc.collect()
+		return(max_pos)
+
+	def permute_model_comparison_tfce(self, n_permutations, whiten = True, use_chunks = True, chunk_size = 768, stratification_blocks = None):
+		"""
+		Performs TFCE-based permutation testing for a given contrast index.
+		
+		This function computes t-statistic permutations and applies TFCE correction
+		to obtain the maximum TFCE values across permutations.
+
+		Parameters
+		----------
+		n_permutations : int
+			The number of permutations to perform.
+		whiten : bool, optional
+			Whether to whiten the residuals before permutation (default is True).
+		use_chunks : bool, default True
+			Whether to use chunks for the permutation analysis. At the end of each chunk parallel processing stops and restarts until the 
+			desired n_permutations is achieved. This is helpful for any memory leaks. There should be anymore memory leaks now. The default 
+			chunk_size is quite large at 768, so there's probably minimal impact on performance. That is, it is safer to use chunking.
+		chunk_size : int, default = 768
+			The number of permutations per chunk. The default size is set as dividable by many different number of cores such as 8, 6, 12, and 16.
+			The number of permuations (total) will automatically adjust (increase in size) so n_permutations % chunk_size = 0.
+			For example, 2000 permutations ==> 2304 (3 chunks) or 10000 permutaions ==> 10752 (14 chunks).
+		stratification_blocks : None or np.array (ndim =1), default None
+			Shuffling within unique value of stratification block. 
+			while still allowing for a valid assessment of the null hypothesis. This is particularly useful when controlling for confounding variables
+			or when dealing with clustered or hierarchical data.
+
+		Returns
+		----------
+			None.
+		"""
+		assert hasattr(self, 'adjacency_set_'), "Run calculate_compare_reduced_model_tfce first"
+		if self.memory_mapping_:
+			assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
+			y = jload(self.memmap_y_name_, mmap_mode='r')
+		else:
+			y = self.y_
+		if stratification_blocks is not None:
+			stratification_blocks = np.array(stratification_blocks)
+			assert stratification_blocks.ndim == 1, "Error: stratification_blocks.ndim must equal 1"
+		if whiten:
+			y = y - self.predict(self.X_)
+		X = self.X_
+		Xreduced = self.model_compare_Xreduced_
+
+		if use_chunks:
+			tfce_maximum_values = []
+			if not n_permutations % chunk_size == 0:
+				res = n_permutations % chunk_size
+				n_permutations += (chunk_size - res)
+			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+			n_chunks = int(n_permutations/chunk_size)
+			for b in range(n_chunks):
+				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
+				seeds = generate_seeds(n_seeds = int(chunk_size))
+				chunk_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
+														delayed(self._run_compare_reduced_model_tfce_permutation)(i = i,
+																						X = X,
+																						Xreduced = Xreduced,
+																						y = y,
+																						H = self.tfce_H_,
+																						E = self.tfce_E_,
+																						adjacency_set = self.adjacency_set_,
+																						mask_data = self.mask_data_,
+																						stratification_arr = stratification_blocks,
+																						seed = seeds[i]) for i in tqdm(range(int(chunk_size))))
+				tfce_maximum_values.append(chunk_tfce_maximum_values)
+			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
+		else:
+			seeds = generate_seeds(n_seeds = int(n_permutations))
+			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+			seeds = generate_seeds(n_seeds = int(n_permutations))
+			tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
+														delayed(self._run_compare_reduced_model_tfce_permutation)(i = i,
+																						X = X,
+																						Xreduced = Xreduced,
+																						y = y,
+																						H = self.tfce_H_,
+																						E = self.tfce_E_,
+																						adjacency_set = self.adjacency_set_,
+																						mask_data = self.mask_data_,
+																						stratification_arr = stratification_blocks,
+																						seed = seeds[i]) for i in tqdm(range(int(n_permutations))))
+			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
+		self.model_compare_z_tfce_max_permutations_ = tfce_maximum_values
 
 	def predict(self, X):
 		"""
