@@ -2037,43 +2037,56 @@ class LinearRegressionModelMRI:
 		self.mediation_exogB_ = exogB
 		self.mediation_endogA_ = endogA
 		self.mediation_endogB_ = endogB
+		return(self)
 
 	def calculate_mediation_z_tfce(self, ImageObjectMRI, H = 2., E = 0.6667):
 		"""
-		Computes TFCE-enhanced t-statistics for both positive and negative contrasts.
+		Compute TFCE-enhanced z-statistics for mediation analysis.
 		
-		This function applies the TFCE algorithm to enhance statistical maps using adjacency sets.
-		
+		Applies the Threshold-Free Cluster Enhancement (TFCE) algorithm to mediation z-score maps
+		using specified adjacency relationships. Computes both positive and negative enhancements.
+
 		Parameters
 		----------
-		adjacency_set : list
-			A set defining the adjacency relationships between data points.
+		ImageObjectMRI : object
+			MRI image object containing:
+			- mask_data_: Binary mask of valid voxels/vertices
+			- adjacency_: Adjacency relationship definitions
+			- hemispheres_: (Optional) Present for surface-based data
 		H : float, optional
-			The height exponent for TFCE computation (default is 2.0).
+			Height exponent for TFCE computation (default=2.0).
+			Controls sensitivity to peak values.
 		E : float, optional
-			The extent exponent for TFCE computation (default is 0.6667).
+			Extent exponent for TFCE computation (default=0.6667).
+			Controls sensitivity to cluster extent.
 		
 		Raises
 		------
 		AssertionError
-			If the t-statistics have not been computed before running TFCE.
+			If mediation z-scores haven't been computed (run calculate_mediation_z_from_formula first)
 		"""
 		assert hasattr(self, 'mediation_z_'), "Run calculate_tstatistics() first"
 		zval = self.mediation_z_.astype(np.float32, order = "C")
 
 		if hasattr(ImageObjectMRI, 'hemispheres_'):
-			self.mediation_z_tfce_ =  self._calculate_surface_tfce(mask_data = ImageObjectMRI.mask_data_,
+			tfce_values =  self._calculate_surface_tfce(mask_data = ImageObjectMRI.mask_data_,
 																		statistic = zval.astype(np.float32, order = "C"),
 																		adjacency_set = ImageObjectMRI.adjacency_,
 																		H = H, E = E,
-																		only_positive_contrast = True,
+																		only_positive_contrast = False,
 																		return_max_tfce = False)
+			self.mediation_z_tfce_positive_ = tfce_values[0]
+			self.mediation_z_tfce_negative_ = tfce_values[1]
 		else:
 			calcTFCE = CreateAdjSet(H, E, ImageObjectMRI.adjacency_) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
 			stat = zval.astype(np.float32, order = "C")
 			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
 			calcTFCE.run(stat, stat_TFCE)
-			self.mediation_z_tfce_ = stat_TFCE
+			self.mediation_z_tfce_positive_ = stat_TFCE
+			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+			calcTFCE.run(-stat, stat_TFCE)
+			self.mediation_z_tfce_negative_ = stat_TFCE
+
 		self.mask_data_ = ImageObjectMRI.mask_data_
 		self.adjacency_set_ = ImageObjectMRI.adjacency_
 		self.tfce_H_ = float(H)
@@ -2084,12 +2097,14 @@ class LinearRegressionModelMRI:
 		"""
 		Perform a single TFCE-based permutation test for mediation analysis.
 
-		This method shuffles the data, calculates Sobel z-scores, and applies the TFCE algorithm to assess the statistical significance of the mediation effect under the permutation scheme. The function computes the maximum TFCE value for the permuted z-statistic, providing insight into the robustness of the mediation effect.
+		This method shuffles the data, calculates Sobel z-scores, and applies the TFCE algorithm 
+		to assess the statistical significance of the mediation effect under permutation. 
+		Returns the maximum positive and negative TFCE values from the permuted data.
 
 		Parameters
 		----------
 		i : int
-			The permutation index. This parameter is required for parallel processing but is not used directly within the function.
+			The permutation index (required for parallel processing but unused).
 		exogA : np.ndarray, shape (n_samples, n_features)
 			Exogenous variables for the first stage in the mediation analysis.
 		endogA : np.ndarray, shape (n_samples,)
@@ -2099,18 +2114,23 @@ class LinearRegressionModelMRI:
 		endogB : np.ndarray, shape (n_samples,)
 			Endogenous variable for the second stage in the mediation analysis.
 		H : float
-			The height exponent used in the TFCE computation. Controls the sensitivity to large values in the statistic.
+			Height exponent for TFCE computation (sensitivity to large values).
 		E : float
-			The extent exponent used in the TFCE computation. Controls the sensitivity to the spatial extent of clusters.
+			Extent exponent for TFCE computation (sensitivity to cluster size).
 		adjacency_set : list
-			A list defining adjacency relationships between data points, typically used for establishing neighborhood connections in the TFCE algorithm.
+			Adjacency relationships between data points for TFCE neighborhood.
+		mask_data : np.ndarray
+			Binary mask indicating valid data points in the brain image.
+		stratification_arr : np.ndarray or None
+			Array defining blocks for constrained permutations. If None, performs 
+			unconstrained permutations.
 		seed : int or None
-			The random seed for permutation. If 'None', a random seed will be selected.
+			Random seed for reproducibility. If None, uses random initialization.
 
 		Returns
 		-------
-		float
-			The maximum TFCE value calculated for the permuted z-statistic (mediation effect) during the permutation test.
+		tuple
+			(max_positive_tfce, max_negative_tfce) values from the permutation.
 		"""
 		if seed is None:
 			np.random.seed(np.random.randint(4294967295))
@@ -2126,30 +2146,38 @@ class LinearRegressionModelMRI:
 
 		# Compute TFCE
 		if len(adjacency_set) == 2:
-			max_tfce = self._calculate_surface_tfce(mask_data = mask_data,
+			tfce_values = self._calculate_surface_tfce(mask_data = mask_data,
 																statistic = tmp_z.astype(np.float32, order = "C"),
 																adjacency_set = adjacency_set,
 																H = H,
 																E = E,
 																return_max_tfce = True,
-																only_positive_contrast = True)
+																only_positive_contrast = False)
+			max_pos, max_neg = tfce_values
 		else:
 			perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
 			stat = tmp_z.astype(np.float32, order="C")
 			stat_TFCE = np.zeros_like(stat).astype(np.float32, order="C")
 			perm_calcTFCE.run(stat, stat_TFCE)
-			max_tfce = stat_TFCE.max()
+			max_pos = stat_TFCE.max()
+			# Compute TFCE for negative statistics
+			stat_TFCE.fill(0)
+			perm_calcTFCE.run(-stat, stat_TFCE)
+			max_neg = stat_TFCE.max()
+			stat = None
+			stat_TFCE = None
+			perm_calcTFCE = None
 			# Memory cleanup
-			del stat_TFCE, stat, perm_calcTFCE
+			del stat, stat_TFCE, perm_calcTFCE
 		mask_data = None
 		tmp_z = None
 		del tmp_z, mask_data
 		gc.collect()
-		return(max_tfce)
+		return(max_pos, max_neg)
 
-	def permute_mediation_z_tfce(self, n_permutations, use_chunks = True, chunk_size = 768, stratification_blocks = None):
+	def permute_mediation_z_tfce(self, n_permutations, use_chunks=True, chunk_size=768, stratification_blocks=None):
 		"""
-		Perform TFCE-based permutation testing for a given contrast index.
+		Perform TFCE-based permutation testing for mediation z-scores.
 
 		This method runs a series of permutations, computes Sobel z-scores, and applies the TFCE 
 		(Threshold-Free Cluster Enhancement) correction to obtain the maximum TFCE values across permutations.
@@ -2158,27 +2186,37 @@ class LinearRegressionModelMRI:
 		----------
 		n_permutations : int
 			The number of permutations to perform in the permutation testing process.
+		use_chunks : bool, default True
+			Whether to process permutations in chunks to prevent memory issues. Each chunk completes
+			before starting the next. The default chunk_size (768) is chosen for good divisibility
+			across common core counts (8, 12, 16, etc.).
+		chunk_size : int, default 768
+			Number of permutations per chunk. Total permutations will be adjusted up to the nearest
+			multiple of chunk_size. For example:
+			- 2000 permutations → 2304 (3 chunks)
+			- 10000 permutations → 10752 (14 chunks)
+		stratification_blocks : array-like or None, default None
+			Array defining blocks for constrained permutations. Permutations are performed within
+			each block to control for confounding variables or clustered data structures.
 
 		Returns
 		-------
 		None
-			The function updates the 'mediation_z_tfce_max_permutations_' attribute with the computed
-			maximum TFCE values across all permutations.
+			Updates the 'mediation_z_tfce_max_permutations_' attribute with maximum TFCE values
+			from all permutations.
 		"""
-		assert hasattr(self, 'adjacency_set_'), "Run calculate_tstatistics_tfce first"
-		print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-		seeds = generate_seeds(n_seeds = n_permutations)
+		assert hasattr(self, 'adjacency_set_'), "Run calculate_mediation_z_from_formula first"
+		assert hasattr(self, 'mediation_z_'), "Run calculate_mediation_z_from_formula first"
 
 		if use_chunks:
 			tfce_maximum_values = []
-			if not n_permutations % chunk_size == 0:
-				res = n_permutations % chunk_size
-				n_permutations += (chunk_size - res)
+			if n_permutations % chunk_size != 0:
+				n_permutations += chunk_size - (n_permutations % chunk_size)
 			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
 			n_chunks = int(n_permutations/chunk_size)
 			for b in range(n_chunks):
 				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
-				seeds = generate_seeds(n_seeds = int(chunk_size))
+				seeds = generate_seeds(n_seeds = int(chunk_size/2))
 				chunk_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
 														delayed(self._run_tfce_mediation_z_permutation)(i = i, 
 																						exogA = self.mediation_exogA_,
@@ -2190,13 +2228,13 @@ class LinearRegressionModelMRI:
 																						adjacency_set = self.adjacency_set_,
 																						mask_data = self.mask_data_,
 																						stratification_arr = stratification_blocks,
-																						seed = seeds[i]) for i in tqdm(range(int(chunk_size))))
+																						seed = seeds[i]) for i in tqdm(range(int(chunk_size/2))))
 				tfce_maximum_values.append(chunk_tfce_maximum_values)
 			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
 		else:
-			seeds = generate_seeds(n_seeds = int(n_permutations))
+			seeds = generate_seeds(n_seeds = int(n_permutations/2))
 			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			seeds = generate_seeds(n_seeds = int(n_permutations))
+			seeds = generate_seeds(n_seeds = int(n_permutations/2))
 			tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
 													delayed(self._run_tfce_mediation_z_permutation)(i = i, 
 																					exogA = self.mediation_exogA_,
@@ -2208,7 +2246,7 @@ class LinearRegressionModelMRI:
 																					adjacency_set = self.adjacency_set_,
 																					mask_data = self.mask_data_,
 																					stratification_arr = stratification_blocks,
-																					seed = seeds[i]) for i in tqdm(range(int(n_permutations))))
+																					seed = seeds[i]) for i in tqdm(range(int(n_permutations/2))))
 			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
 		self.mediation_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
 
@@ -2403,7 +2441,6 @@ class LinearRegressionModelMRI:
 			full model relative to the reduced one after penalizing for
 			complexity (more strongly than AIC). Shape (n_targets,). Only set
 			if 'calculate_log_ratio_test=True' and 'use_bic=True'.
-
 
 		Raises
 		------
@@ -2715,23 +2752,6 @@ class LinearRegressionModelMRI:
 			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
 		self.nested_model_z_tfce_max_permutations_ = tfce_maximum_values
 
-	def predict(self, X):
-		"""
-		Predict y values using the dot product of the coefficients.
-		
-		Parameters
-		----------
-		X : nd.array with shape (n_samples, n_features)
-			Exogenous variables to predict y (yhat).
-		Returns
-		-------
-		y_pred : ndarray of shape (n_samples,n_dependent_variables)
-			The predicted endogenous variables.
-		"""
-		if self.fit_intercept_ and np.mean(X[:, 0]) != 1:
-			X = self._stack_ones(X)
-		return(np.dot(X, self.coef_))
-
 	def write_t_tfce_results(self, ImageObjectMRI, contrast_index, write_surface_ply = False, surface_ply_vmin = 0.95, surface_ply_vmax = 1.0, force_max_tfce_direction = False):
 		"""
 		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
@@ -2824,28 +2844,28 @@ class LinearRegressionModelMRI:
 		self.t_tfce_positive_oneminusp_[contrast_index] = oneminuspfwe_pos
 		self.t_tfce_negative_oneminusp_[contrast_index] = oneminuspfwe_neg
 
-	def write_mediation_z_tfce_results(self, data_mask, affine):
+	def write_mediation_z_tfce_results(self, ImageObjectMRI, write_surface_ply = False, surface_ply_vmin = 0.95, surface_ply_vmax = 1.0):
 		"""
-		Write the Threshold-Free Cluster Enhancement (TFCE) results for the Sobel Z-score.
-
-		This function saves multiple NIfTI images containing the Z-values, TFCE values, and 
-		their respective FWER corrected p-values. The results are saved as NIfTI images with file names
-		indicating the type of analysis (Z-values, TFCE, and TFCE p-values).
+		Writes the Threshold-Free Cluster Enhancement (TFCE) results for mediation Z-scores.
+		
+		This function saves multiple NIfTI or mgh scalar images containing the Z-values, positive and negative
+		TFCE values, and their respective corrected p-values.
 
 		Parameters
 		----------
-		data_mask : numpy.ndarray
-			A binary mask indicating valid data points in the brain image. The mask is used to 
-			ensure that only the valid regions of the image are considered for saving the results.
-		
-		affine : numpy.ndarray
-			The affine transformation matrix for the NIfTI images, which is necessary for the 
-			proper spatial alignment of the data when writing to NIfTI format.
+		ImageObjectMRI : object
+			An MRI image object containing mask data and affine transformation.
+		write_surface_ply : bool, optional
+			Whether to write surface PLY files for visualization (default: False).
+		surface_ply_vmin : float, optional
+			Minimum value threshold for surface visualization (default: 0.95).
+		surface_ply_vmax : float, optional
+			Maximum value threshold for surface visualization (default: 1.0).
 
 		Raises
 		------
 		AssertionError
-			If the required TFCE permutations have not been computed before calling this method.
+			If the required TFCE permutations have not been computed.
 		
 		Notes
 		-----
@@ -2853,12 +2873,50 @@ class LinearRegressionModelMRI:
 		resulting data is available in 'mediation_z_tfce_max_permutations_' and 'mediation_z_tfce_'.
 		The function also calls 'write_nibabel_image' to save the generated images.
 		"""
+		assert hasattr(self, 'mediation_z_tfce_positive_'), "Run calculate_mediation_z_tfce first"
 		assert hasattr(self, 'mediation_z_tfce_max_permutations_'), "Run permute_mediation_z_tfce first"
 		contrast_name = "mediation_z"
-		self.write_nibabel_image(values = self.mediation_z_, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
-		self.write_nibabel_image(values = self.mediation_z_tfce_, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce.nii.gz")
-		oneminuspfwe = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_,self.mediation_z_tfce_)
-		self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce-1minusp.nii.gz")
+
+		if not hasattr(self, 'mediation_z_tfce_positive_oneminusp_'):
+			self.mediation_z_tfce_positive_oneminusp_ = np.zeros_like(self.mediation_z_tfce_positive_)
+			self.mediation_z_tfce_negative_oneminusp_ = np.zeros_like(self.mediation_z_tfce_negative_)
+
+		data_mask = ImageObjectMRI.mask_data_
+		affine = ImageObjectMRI.affine_
+		if len(data_mask) == 2:
+			self.write_freesurfer_image(values=self.mediation_z_, data_mask=data_mask, affine=affine, outname=contrast_name + ".mgh")
+			# Positive TFCE
+			self.write_freesurfer_image(values=self.mediation_z_tfce_positive_, data_mask=data_mask, affine=affine, outname=contrast_name + "-tfce_positive.mgh")
+			oneminuspfwe_pos = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_, self.mediation_z_tfce_positive_)
+			self.write_freesurfer_image(values=oneminuspfwe_pos, data_mask=data_mask, affine=affine, outname=contrast_name + "-tfce_positive-1minusp.mgh")
+			# Negative TFCE
+			self.write_freesurfer_image(values=self.mediation_z_tfce_negative_, data_mask=data_mask, affine=affine, outname=contrast_name + "-tfce_negative.mgh")
+			oneminuspfwe_neg = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_, self.mediation_z_tfce_negative_)
+			self.write_freesurfer_image(values=oneminuspfwe_neg, data_mask=data_mask, affine=affine, outname=contrast_name + "-tfce_negative-1minusp.mgh")
+			if write_surface_ply:
+				write_cortical_surface_results_to_ply(positive_scalar_array = oneminuspfwe_pos,
+										ImageObjectMRI = ImageObjectMRI,
+										outname = contrast_name + "-tfce-1minusp.ply",
+										negative_scalar_array = oneminuspfwe_neg,
+										vmin = surface_ply_vmin,
+										vmax = surface_ply_vmax,
+										lh_srf_path = os.path.join(static_directory, 'lh.midthickness.srf'),
+										rh_srf_path = os.path.join(static_directory, 'rh.midthickness.srf'),
+										perform_surface_smoothing = True, n_smoothing_iterations = 50,
+										positive_cmap='red-yellow',
+										negative_cmap='blue-lightblue')
+		else:
+			self.write_nibabel_image(values = self.mediation_z_, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
+			# Positive TFCE
+			self.write_nibabel_image(values = self.mediation_z_tfce_positive_, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.nii.gz")
+			oneminuspfwe_pos = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_,self.mediation_z_tfce_positive_)
+			self.write_nibabel_image(values = oneminuspfwe_pos, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.nii.gz")
+			 # Negative TFCE
+			self.write_nibabel_image(values = self.mediation_z_tfce_negative_, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.nii.gz")
+			oneminuspfwe_neg = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_, self.mediation_z_tfce_negative_)
+			self.write_nibabel_image(values = oneminuspfwe_neg, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
+		self.mediation_z_tfce_positive_oneminusp_ = oneminuspfwe_pos
+		self.mediation_z_tfce_negative_oneminusp_ = oneminuspfwe_neg
 
 	def write_freesurfer_image(self, values, data_mask, affine, outname):
 		"""
@@ -2895,7 +2953,6 @@ class LinearRegressionModelMRI:
 			outdata[data_mask[1]==1] = values[midpoint:]
 			nib.save(nib.freesurfer.mghformat.MGHImage(outdata[:,np.newaxis, np.newaxis].astype(np.float32), affine[1]), outname[:-4] + ".rh.mgh")
 
-
 	def write_nibabel_image(self, values, data_mask, affine, outname):
 		"""
 		Saves an array of values as a NIfTI image.
@@ -2917,6 +2974,23 @@ class LinearRegressionModelMRI:
 			outdata = np.zeros((data_mask.shape))
 			outdata[data_mask==1] = values
 			nib.save(nib.Nifti1Image(outdata, affine), outname)
+
+	def predict(self, X):
+		"""
+		Predict y values using the dot product of the coefficients.
+		
+		Parameters
+		----------
+		X : nd.array with shape (n_samples, n_features)
+			Exogenous variables to predict y (yhat).
+		Returns
+		-------
+		y_pred : ndarray of shape (n_samples,n_dependent_variables)
+			The predicted endogenous variables.
+		"""
+		if self.fit_intercept_ and np.mean(X[:, 0]) != 1:
+			X = self._stack_ones(X)
+		return(np.dot(X, self.coef_))
 
 	def save(self, filename):
 		"""
