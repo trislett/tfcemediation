@@ -1118,9 +1118,9 @@ class VoxelImage:
 				Use 8 for only the immediatiately adjacent voxel (e.g., analysis of second level fMRI data).
 		Raises
 		----------
-			AssertionError: connectivity_directions is not 8 or 26.
+			AssertionError: connectivity_directions is not 6 or 26.
 		"""
-		assert connectivity_directions==6 or connectivity_directions==26, "adjacency_directions must equal {8, 26}"
+		assert connectivity_directions==6 or connectivity_directions==26, "adjacency_directions must equal {6, 26}"
 		if connectivity_directions == 6:
 			new_mask = self._check_mask(self.mask_data_, connectivity = 1)
 			if new_mask.sum() != self.mask_data_.sum():
@@ -2834,13 +2834,13 @@ class LinearRegressionModelMRI:
 			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
 			values = self.t_tfce_positive_[contrast_index]
 			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.nii.gz")
-			oneminuspfwe = 1 - self._calculate_permuted_pvalue(t_tfce_max_permutations_pos,values)
-			self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.nii.gz")
+			oneminuspfwe_pos = 1 - self._calculate_permuted_pvalue(t_tfce_max_permutations_pos,values)
+			self.write_nibabel_image(values = oneminuspfwe_pos, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.nii.gz")
 
 			values = self.t_tfce_negative_[contrast_index]
 			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.nii.gz")
-			oneminuspfwe = 1 - self._calculate_permuted_pvalue(t_tfce_max_permutations_neg, values)
-			self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
+			oneminuspfwe_neg = 1 - self._calculate_permuted_pvalue(t_tfce_max_permutations_neg, values)
+			self.write_nibabel_image(values = oneminuspfwe_neg, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
 		self.t_tfce_positive_oneminusp_[contrast_index] = oneminuspfwe_pos
 		self.t_tfce_negative_oneminusp_[contrast_index] = oneminuspfwe_neg
 
