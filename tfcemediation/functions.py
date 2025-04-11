@@ -2206,7 +2206,7 @@ class LinearRegressionModelMRI:
 			from all permutations.
 		"""
 		assert hasattr(self, 'adjacency_set_'), "Run calculate_mediation_z_from_formula first"
-		assert hasattr(self, 'mediation_z_'), "Run calculate_mediation_z_from_formula first"
+		assert hasattr(self, 'mediation_z_tfce_positive_'), "Run calculate_mediation_z_tfce first"
 
 		if use_chunks:
 			tfce_maximum_values = []
