@@ -1222,7 +1222,18 @@ class VoxelImage:
 
 class LinearRegressionModelMRI:
 	"""
-	Linear regression models for neuroimaging data with support for surface/volume TFCE, mediation, and nested models.
+	The LinearRegressionModelMRI class implements linear regression models specifically optimized for neuroimaging data analysis, with several technical advantages:
+		Neuroimaging-Specific Tools: Supports both volume (NIfTI) and surface-based (FreeSurfer) data formats
+		Threshold-Free Cluster Enhancement (TFCE) for both surface-based (FreeSurfer) and volumetric (NIfTI) data
+		Advanced Vertex-wise/Voxel-wise Statistical Methods:
+			Mediation analysis
+			Nested model comparison for hypothesis testing
+		Ease of Use: Patsy-like formula specification can be used with pandas dataframes
+		Memory Efficiency: Much lower memory requirement that other neuroimaigng statistical software (e.g., ~36GB for ~1000 subjects with 300k verticies 
+								with optional memory mapping for handling very large datasets.
+		Computational Efficiency: For 1000 Subjects, voxel-based anaysis take around 25 minutes with 16 cores and 1.5h for vertex-wise analyses
+		Visualization: Flexible exporting of results in standard neuroimaging formats and *.ply
+		Reproducibility: Statistical models can be saved in data efficient manner
 	"""
 	def __init__(self, *, fit_intercept = True, n_jobs = 16, memory_mapping = False, use_tmp = True, fdr_correction = False, output_directory = None):
 		"""
@@ -1256,6 +1267,68 @@ class LinearRegressionModelMRI:
 		else:
 			self.output_directory_ = "output_directory_%s" % datetime.datetime.now().strftime('%Y_%m_%d_%H%M')
 		os.makedirs(self.output_directory_, exist_ok=True)
+
+	def fit(self, X, y):
+		"""
+		Fit the linear regression model to the data. X can be a np.ndarray or a patsy-like formula (e.g., X='age + sex + site + diagnosis'). If using a
+		a formula, make to to load a pandas dataframe first using load_pandas_dataframe or load_csv_dataframe.
+
+		Parameters
+		----------
+		X : np.ndarray or str, shape(n_samples, n_features) or formula_like
+			Exogneous variables
+		
+		y : np.ndarray or str, shape(n_samples, n_dependent_variables) or 'mapped'
+			Endogenous variables
+
+		Returns
+		-------
+		self : object
+			Fitted model instance.
+		"""
+		if isinstance(X, str):
+			assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
+			X = self.dummy_code_from_formula(formula_like = X, save_columns_names = True)
+			self.print_t_contrast_indices()
+		y = self._handle_y_memmapping(y)
+		X, y = self._check_inputs(X, y)
+		if self.fit_intercept_:
+			if np.mean(X[:,0]) != 1:
+				X = self._stack_ones(X)
+		n, k = X.shape # n_samples, rank
+		df_between = k - 1
+		df_within = n - k
+		df_total = n - 1
+		a = cy_lin_lstsqr_mat(X, y)
+		leverage = (X * np.linalg.pinv(X).T).sum(1).reshape(-1,1)
+
+		self.X_ = X 
+		self.y_ = y
+		self.n_ = n
+		self.k_ = k
+		self.df_between_ = df_between
+		self.df_within_ = df_within
+		self.df_total_ = df_total
+		self.coef_ = a
+		self.leverage_ = leverage
+		return(self)
+
+	def predict(self, X):
+		"""
+		Predict y values using the dot product of the coefficients.
+		
+		Parameters
+		----------
+		X : nd.array with shape (n_samples, n_features)
+			Exogenous variables to predict y (yhat).
+		Returns
+		-------
+		y_pred : ndarray of shape (n_samples,n_dependent_variables)
+			The predicted endogenous variables.
+		"""
+		if self.fit_intercept_ and np.mean(X[:, 0]) != 1:
+			X = self._stack_ones(X)
+		return(np.dot(X, self.coef_))
 
 	def _check_inputs(self, X, y):
 		"""
@@ -1306,38 +1379,8 @@ class LinearRegressionModelMRI:
 		
 		"""
 		return(np.column_stack([np.ones(len(arr)),arr]))
-	
-	def _clean_memmmap(self):
-		"""
-		Delete memory mapped variables
-		"""
-		if hasattr(self, 'memmap_y_name_'):
-			if os.path.isfile(self.memmap_y_name_):
-				os.remove(self.memmap_y_name_)
-			else:
-				 print("Error: %s memory mapped file not found" % self.memmap_y_name_)
-			self.memmap_y_name_ = None
-		else:
-			print("Error: No memory mapped files to remove.")
 
-	def _calculate_permuted_pvalue(self, permuted_distribution_arr, statistic_arr):
-		"""
-		Calculates p-values of an array from a permuted distribution
-		
-		Parameters
-		----------
-		permuted_distribution_arr : np.ndarray, shape(n_permutations)
-			permuted statistic array
-		
-		statistic_arr : np.ndarray or str, shape(n_features)
-			statistic array
-		
-		Returns
-		---------
-		arr : np.ndarray
-			p-values of statistic array
-		"""
-		return(np.mean(permuted_distribution_arr[:, None] >= statistic_arr, axis=0, dtype=np.float32))
+	#Data Management
 
 	def load_pandas_dataframe(self, df):
 		"""
@@ -1409,25 +1452,6 @@ class LinearRegressionModelMRI:
 		else:
 			return(dummy_arr)
 
-	def print_t_contrast_indices(self):
-		"""
-		Print the indices of t-contrasts.
-
-		If the attribute 't_contrast_names_' exists, this function prints the index 
-		and corresponding contrast name. Otherwise, it prints the numeric indices 
-		for all available contrasts.
-
-		Parameters:
-		-----------
-		self : object
-			The instance containing 't_contrast_names_' and 't_' attributes.
-		"""
-		if hasattr(self, 't_contrast_names_'):
-			for t in range(len(self.t_contrast_names_)):
-				print("[index=%d] ==> %s" % (t, self.t_contrast_names_[t]))
-		else:
-			print(np.arange(self.t_.shape[0]))
-
 	def _handle_y_memmapping(self, y):
 		"""Handles loading or creating memory-mapped y array."""
 		if isinstance(y, str) and y == 'mapped':
@@ -1461,69 +1485,21 @@ class LinearRegressionModelMRI:
 			# If not mapping or already mapped, return the original (or checked) y
 			return(y_checked)
 
-	def fit(self, X, y):
+	def _clean_memmmap(self):
 		"""
-		Fit the linear regression model to the data. X can be a np.ndarray or a patsy-like formula (e.g., X='age + sex + site + diagnosis'). If using a
-		a formula, make to to load a pandas dataframe first using load_pandas_dataframe or load_csv_dataframe.
-
-		Parameters
-		----------
-		X : np.ndarray or str, shape(n_samples, n_features) or formula_like
-			Exogneous variables
-		
-		y : np.ndarray or str, shape(n_samples, n_dependent_variables) or 'mapped'
-			Endogenous variables
-
-		Returns
-		-------
-		self : object
-			Fitted model instance.
+		Delete memory mapped variables
 		"""
-		if isinstance(X, str):
-			assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
-			X = self.dummy_code_from_formula(formula_like = X, save_columns_names = True)
-			self.print_t_contrast_indices()
-		y = self._handle_y_memmapping(y)
-		X, y = self._check_inputs(X, y)
-		if self.fit_intercept_:
-			if np.mean(X[:,0]) != 1:
-				X = self._stack_ones(X)
-		n, k = X.shape # n_samples, rank
-		df_between = k - 1
-		df_within = n - k
-		df_total = n - 1
-		a = cy_lin_lstsqr_mat(X, y)
-		leverage = (X * np.linalg.pinv(X).T).sum(1).reshape(-1,1)
+		if hasattr(self, 'memmap_y_name_'):
+			if os.path.isfile(self.memmap_y_name_):
+				os.remove(self.memmap_y_name_)
+			else:
+				 print("Error: %s memory mapped file not found" % self.memmap_y_name_)
+			self.memmap_y_name_ = None
+		else:
+			print("Error: No memory mapped files to remove.")
 
-		self.X_ = X 
-		self.y_ = y
-		self.n_ = n
-		self.k_ = k
-		self.df_between_ = df_between
-		self.df_within_ = df_within
-		self.df_total_ = df_total
-		self.coef_ = a
-		self.leverage_ = leverage
-		return(self)
+	# Statistical Analysis
 
-	def predict(self, X):
-		"""
-		Predict y values using the dot product of the coefficients.
-		
-		Parameters
-		----------
-		X : nd.array with shape (n_samples, n_features)
-			Exogenous variables to predict y (yhat).
-		Returns
-		-------
-		y_pred : ndarray of shape (n_samples,n_dependent_variables)
-			The predicted endogenous variables.
-		"""
-		if self.fit_intercept_ and np.mean(X[:, 0]) != 1:
-			X = self._stack_ones(X)
-		return(np.dot(X, self.coef_))
-
-	# Calculate stats
 	def calculate_tstatistics(self, calculate_probability = False):
 		"""
 		Calculate t-statistics for the model coefficients.
@@ -1824,91 +1800,47 @@ class LinearRegressionModelMRI:
 		self.nested_model_df_den_ = df_den
 		return(self)
 
-	# calculate TFCE
-	# helper function for surface TFCE
-	def _calculate_surface_tfce(self, mask_data, statistic, adjacency_set, H = 2.0, E = 0.67, return_max_tfce = False, only_positive_contrast = False):
+	def outlier_detection(self, f_quantile = 0.99, low_ram = True, outlier_tolerance_count = 2):
 		"""
-		Computes the TFCE (Threshold-Free Cluster Enhancement) statistic for surface-based data.
-		
-		This function calculates TFCE values separately for left and right hemispheres based on the provided adjacency set. 
-		It supports returning either the full TFCE-enhanced statistic or only the maximum value.
+		Detect outliers using Cook's distance. Cook's distance is defined as the coefficient vector would move 
+		if the sample were removed and the model refit.
 
 		Parameters
 		----------
-		mask_data : list of numpy arrays
-			Binary masks indicating valid data points for each hemisphere.
-		statistic : numpy array
-			The statistical values corresponding to the data points in the mask.
-		adjacency_set : list
-			A list containing adjacency information for left and right hemisphere.
-		H : float, optional
-			The height exponent for TFCE computation (default is 2.0).
-		E : float, optional
-			The extent exponent for TFCE computation (default is 0.67).
-		return_max_tfce : bool, optional
-			If True, returns only the maximum TFCE value; otherwise, returns full TFCE statistics (default is False).
-
+		f_quantile : float
+			The threshold for identifying outliers using the F-distribution.
+		outlier_tolerance_count : int, default outlier_tolerance_count=2.
+			The cutoff for the allowable number of outliers (i.e., outlier subjects). The percentage outlier will also be calculated.
+		low_ram : bool, default = True
+			Deletes self.residual_studentized_ and self.cooks_distance_ to save RAM
+		
 		Returns
 		-------
-		tuple of numpy arrays
-			TFCE-enhanced statistics for positive and negative contrasts.
-		"""
-		midpoint = mask_data[0].sum()
+		self : object
+			Model instance with detected outliers based on Cook's distance.
 		
-		vertStat_out_lh = np.zeros(mask_data[0].shape[0], dtype=np.float32, order="C")
-		vertStat_out_rh = np.zeros(mask_data[1].shape[0], dtype=np.float32, order="C")
-		vertStat_TFCE_lh = np.zeros_like(vertStat_out_lh).astype(np.float32, order = "C")
-		vertStat_TFCE_rh = np.zeros_like(vertStat_out_rh).astype(np.float32, order = "C")
+		Reference
+		-------
+		Cook, R. D. (1977). Detection of Influential Observation in Linear Regression. Technometrics, 19(1), 15–18. doi:10.1080/00401706.1977.10489493 
+		"""
+		assert hasattr(self, 'coef_'), "Run fit(X, y) first"
+		if not hasattr(self, 'residuals_'):
+			self.residuals_ = self.y_ - np.dot(self.X_, self.coef_)
+			self.sse_ = np.sum(self.residuals_**2, axis=0)
+			self.mse_ = np.divide(self.sse_, self.df_within_)
+		self.residuals_studentized_ = np.divide(np.divide(self.residuals_, np.sqrt(self.mse_)), np.sqrt(1 - self.leverage_))
+		self.cooks_distance_ = np.divide(self.residuals_studentized_**2, self.k_) * np.divide(self.leverage_, (1 -  self.leverage_))
+		self.cooks_distance_threshold_ = fdist.ppf(f_quantile, self.k_, (self.n_ - self.k_))
+		self.n_outliers_ = (self.cooks_distance_ > self.cooks_distance_threshold_).sum(0)
+		self.n_outliers_percentage_ = np.divide(self.n_outliers_ * 100, self.n_)
+		self.outlier_ = np.zeros((len(self.n_outliers_)), int)
+		self.outlier_[self.n_outliers_ > outlier_tolerance_count] = 1
+		if low_ram:
+			del self.residuals_studentized_ 
+			del self.cooks_distance_
+		return(self)
 
-		vertStat_out_lh[mask_data[0] == 1] = statistic[:midpoint]
-		vertStat_out_rh[mask_data[1] == 1] = statistic[midpoint:]
-
-		calcTFCE_lh = CreateAdjSet(H, E, adjacency_set[0])
-		calcTFCE_rh = CreateAdjSet(H, E, adjacency_set[1])
-		calcTFCE_lh.run(vertStat_out_lh, vertStat_TFCE_lh)
-		calcTFCE_rh.run(vertStat_out_rh, vertStat_TFCE_rh)
-
-		if return_max_tfce:
-			out_statistic_positive = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
-		else:
-			out_statistic_positive = np.zeros_like(statistic).astype(np.float32, order = "C")
-			out_statistic_positive[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
-			out_statistic_positive[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
-
-		if only_positive_contrast:
-			adjacency_set = None
-			vertStat_out_lh = None
-			vertStat_out_rh = None
-			vertStat_TFCE_lh = None
-			vertStat_TFCE_rh = None
-			calcTFCE_lh = None
-			calcTFCE_rh = None
-			del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
-			gc.collect()
-			return(out_statistic_positive)
-		else:
-			vertStat_TFCE_lh.fill(0)
-			vertStat_TFCE_rh.fill(0)
-
-			calcTFCE_lh.run(-vertStat_out_lh, vertStat_TFCE_lh)
-			calcTFCE_rh.run(-vertStat_out_rh, vertStat_TFCE_rh)
-
-			if return_max_tfce:
-				out_statistic_negative = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
-			else:
-				out_statistic_negative = np.zeros_like(statistic).astype(np.float32, order = "C")
-				out_statistic_negative[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
-				out_statistic_negative[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
-			adjacency_set = None
-			vertStat_out_lh = None
-			vertStat_out_rh = None
-			vertStat_TFCE_lh = None
-			vertStat_TFCE_rh = None
-			calcTFCE_lh = None
-			calcTFCE_rh = None
-			del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
-			gc.collect()
-			return(out_statistic_positive, out_statistic_negative)
+	# TFCE and Permutation Methods
 
 	def calculate_statistics_tfce(self, ImageObjectMRI, mode, H = 2.0, E = 0.6667, contrast = None):
 		"""
@@ -2081,6 +2013,268 @@ class LinearRegressionModelMRI:
 		self.tfce_H_ = float(H)
 		self.tfce_E_ = float(E)
 		return(self)
+
+	def permute_tfce(self, mode, n_permutations, contrast_index=None, whiten=True, use_chunks=True, 
+					 chunk_size=768, stratification_blocks=None):
+		"""
+		Performs TFCE-based permutation testing for different statistical approaches.
+		
+		This function computes permutations and applies TFCE correction to obtain 
+		the maximum TFCE values across permutations for t-statistics, mediation z-scores,
+		or nested model comparisons.
+
+		Parameters
+		----------
+		mode : str
+			The type of permutation to run: {'t', 'mediation', 'nested'}
+		n_permutations : int
+			The number of permutations to perform.
+		contrast_index : int, optional
+			The index of the contrast for permutation testing (required for 't' mode).
+		whiten : bool, optional
+			Whether to whiten the residuals before permutation (default is True).
+			Only applies to 't' and 'nested' modes.
+		use_chunks : bool, default True
+			Whether to use chunks for the permutation analysis. At the end of each chunk parallel 
+			processing stops and restarts until the desired n_permutations is achieved. This is 
+			helpful for any memory leaks. There should be anymore memory leaks now. The default 
+			chunk_size is quite large at 768, so there's probably minimal impact on performance. 
+			That is, it is safer to use chunking.
+		chunk_size : int, default = 768
+			The number of permutations per chunk. The default size is set as dividable by many 
+			different number of cores such as 8, 6, 12, and 16.
+			The number of permuations (total) will automatically adjust (increase in size) 
+			so n_permutations % chunk_size = 0.
+			For example, 2000 permutations ==> 2304 (3 chunks) or 10000 permutaions ==> 10752 (14 chunks).
+		stratification_blocks : None or np.array (ndim =1), default None
+			Shuffling within unique value of stratification block. 
+			while still allowing for a valid assessment of the null hypothesis. This is particularly 
+			useful when controlling for confounding variables or when dealing with clustered or 
+			hierarchical data.
+		"""
+		assert hasattr(self, 'adjacency_set_'), "Run calculate_tfce first"
+		
+		# Mode-specific preparations
+		if mode == 't':
+			assert contrast_index is not None, "contrast_index is required for t mode"
+			if self.memory_mapping_:
+				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
+				y = jload(self.memmap_y_name_, mmap_mode='r')
+			else:
+				y = self.y_
+			if whiten:
+				y = y - self.predict(self.X_)
+			X = self.X_
+		elif mode == 'mediation':
+			assert hasattr(self, 'mediation_z_tfce_positive_'), "Run calculate_mediation_z_tfce first"
+		elif mode == 'nested':
+			assert hasattr(self, 'adjacency_set_'), "Run calculate_nested_model_z_tfce first"
+			if self.memory_mapping_:
+				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
+				y = jload(self.memmap_y_name_, mmap_mode='r')
+			else:
+				y = self.y_
+			if whiten:
+				y = y - self.predict(self.X_)
+			X = self.X_
+			Xreduced = self.nested_model_Xreduced_
+		else:
+			raise ValueError(f"Unknown mode: {mode}. Use 't', 'mediation', or 'nested'")
+
+		if stratification_blocks is not None:
+			stratification_blocks = np.array(stratification_blocks)
+			assert stratification_blocks.ndim == 1, "Error: stratification_blocks.ndim must equal 1"
+
+		# Determine number of seeds based on mode
+		seeds_divisor = 2 if mode in ['t', 'mediation'] else 1
+		
+		if use_chunks:
+			tfce_maximum_values = []
+			if n_permutations % chunk_size != 0:
+				n_permutations += chunk_size - (n_permutations % chunk_size)
+			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+			n_chunks = int(n_permutations/chunk_size)
+			for b in range(n_chunks):
+				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
+				seeds = generate_seeds(n_seeds=int(chunk_size/seeds_divisor))
+				
+				if mode == 't':
+					chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_tfce_t_permutation)(
+							i=i, 
+							X=X,
+							y=y, 
+							contrast_index=contrast_index,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+				elif mode == 'mediation':
+					chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_tfce_mediation_z_permutation)(
+							i=i, 
+							exogA=self.mediation_exogA_,
+							endogA=self.mediation_endogA_,
+							exogB=self.mediation_exogB_,
+							endogB=self.mediation_endogB_,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+				elif mode == 'nested':
+					chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_nested_z_tfce_permutation)(
+							i=i,
+							X=X,
+							Xreduced=Xreduced,
+							y=y,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+					
+				tfce_maximum_values.append(chunk_tfce_maximum_values)
+			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
+		else:
+			seeds = generate_seeds(n_seeds=int(n_permutations/seeds_divisor))
+			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+			if mode == 't':
+				tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+					delayed(self._run_tfce_t_permutation)(
+						i=i, 
+						X=X,
+						y=y, 
+						contrast_index=contrast_index,
+						H=self.tfce_H_,
+						E=self.tfce_E_,
+						adjacency_set=self.adjacency_set_,
+						mask_data=self.mask_data_,
+						stratification_arr=stratification_blocks,
+						seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+			elif mode == 'mediation':
+				tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+					delayed(self._run_tfce_mediation_z_permutation)(
+						i=i, 
+						exogA=self.mediation_exogA_,
+						endogA=self.mediation_endogA_,
+						exogB=self.mediation_exogB_,
+						endogB=self.mediation_endogB_,
+						H=self.tfce_H_,
+						E=self.tfce_E_,
+						adjacency_set=self.adjacency_set_,
+						mask_data=self.mask_data_,
+						stratification_arr=stratification_blocks,
+						seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+			elif mode == 'nested':
+				tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+					delayed(self._run_nested_z_tfce_permutation)(
+						i=i,
+						X=X,
+						Xreduced=Xreduced,
+						y=y,
+						H=self.tfce_H_,
+						E=self.tfce_E_,
+						adjacency_set=self.adjacency_set_,
+						mask_data=self.mask_data_,
+						stratification_arr=stratification_blocks,
+						seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
+		if mode == 't':
+			self.t_tfce_max_permutations_ = np.array(tfce_maximum_values)
+		elif mode == 'mediation':
+			self.mediation_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
+		elif mode == 'nested':
+			self.nested_model_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
+
+	def _calculate_surface_tfce(self, mask_data, statistic, adjacency_set, H = 2.0, E = 0.67, return_max_tfce = False, only_positive_contrast = False):
+		"""
+		Computes the TFCE (Threshold-Free Cluster Enhancement) statistic for surface-based data.
+		
+		This function calculates TFCE values separately for left and right hemispheres based on the provided adjacency set. 
+		It supports returning either the full TFCE-enhanced statistic or only the maximum value.
+
+		Parameters
+		----------
+		mask_data : list of numpy arrays
+			Binary masks indicating valid data points for each hemisphere.
+		statistic : numpy array
+			The statistical values corresponding to the data points in the mask.
+		adjacency_set : list
+			A list containing adjacency information for left and right hemisphere.
+		H : float, optional
+			The height exponent for TFCE computation (default is 2.0).
+		E : float, optional
+			The extent exponent for TFCE computation (default is 0.67).
+		return_max_tfce : bool, optional
+			If True, returns only the maximum TFCE value; otherwise, returns full TFCE statistics (default is False).
+
+		Returns
+		-------
+		tuple of numpy arrays
+			TFCE-enhanced statistics for positive and negative contrasts.
+		"""
+		midpoint = mask_data[0].sum()
+		
+		vertStat_out_lh = np.zeros(mask_data[0].shape[0], dtype=np.float32, order="C")
+		vertStat_out_rh = np.zeros(mask_data[1].shape[0], dtype=np.float32, order="C")
+		vertStat_TFCE_lh = np.zeros_like(vertStat_out_lh).astype(np.float32, order = "C")
+		vertStat_TFCE_rh = np.zeros_like(vertStat_out_rh).astype(np.float32, order = "C")
+
+		vertStat_out_lh[mask_data[0] == 1] = statistic[:midpoint]
+		vertStat_out_rh[mask_data[1] == 1] = statistic[midpoint:]
+
+		calcTFCE_lh = CreateAdjSet(H, E, adjacency_set[0])
+		calcTFCE_rh = CreateAdjSet(H, E, adjacency_set[1])
+		calcTFCE_lh.run(vertStat_out_lh, vertStat_TFCE_lh)
+		calcTFCE_rh.run(vertStat_out_rh, vertStat_TFCE_rh)
+
+		if return_max_tfce:
+			out_statistic_positive = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
+		else:
+			out_statistic_positive = np.zeros_like(statistic).astype(np.float32, order = "C")
+			out_statistic_positive[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
+			out_statistic_positive[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
+
+		if only_positive_contrast:
+			adjacency_set = None
+			vertStat_out_lh = None
+			vertStat_out_rh = None
+			vertStat_TFCE_lh = None
+			vertStat_TFCE_rh = None
+			calcTFCE_lh = None
+			calcTFCE_rh = None
+			del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
+			gc.collect()
+			return(out_statistic_positive)
+		else:
+			vertStat_TFCE_lh.fill(0)
+			vertStat_TFCE_rh.fill(0)
+
+			calcTFCE_lh.run(-vertStat_out_lh, vertStat_TFCE_lh)
+			calcTFCE_rh.run(-vertStat_out_rh, vertStat_TFCE_rh)
+
+			if return_max_tfce:
+				out_statistic_negative = np.max([vertStat_TFCE_lh, vertStat_TFCE_rh])
+			else:
+				out_statistic_negative = np.zeros_like(statistic).astype(np.float32, order = "C")
+				out_statistic_negative[:midpoint] = vertStat_TFCE_lh[mask_data[0] == 1]
+				out_statistic_negative[midpoint:] = vertStat_TFCE_rh[mask_data[1] == 1]
+			adjacency_set = None
+			vertStat_out_lh = None
+			vertStat_out_rh = None
+			vertStat_TFCE_lh = None
+			vertStat_TFCE_rh = None
+			calcTFCE_lh = None
+			calcTFCE_rh = None
+			del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
+			gc.collect()
+			return(out_statistic_positive, out_statistic_negative)
 
 	# inner permutation functions 
 	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, mask_data, stratification_arr, seed):
@@ -2343,185 +2537,8 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(max_pos)
 
-	def permute_tfce(self, mode, n_permutations, contrast_index=None, whiten=True, use_chunks=True, 
-					 chunk_size=768, stratification_blocks=None):
-		"""
-		Performs TFCE-based permutation testing for different statistical approaches.
-		
-		This function computes permutations and applies TFCE correction to obtain 
-		the maximum TFCE values across permutations for t-statistics, mediation z-scores,
-		or nested model comparisons.
+	# Utility Functions
 
-		Parameters
-		----------
-		mode : str
-			The type of permutation to run: {'t', 'mediation', 'nested'}
-		n_permutations : int
-			The number of permutations to perform.
-		contrast_index : int, optional
-			The index of the contrast for permutation testing (required for 't' mode).
-		whiten : bool, optional
-			Whether to whiten the residuals before permutation (default is True).
-			Only applies to 't' and 'nested' modes.
-		use_chunks : bool, default True
-			Whether to use chunks for the permutation analysis. At the end of each chunk parallel 
-			processing stops and restarts until the desired n_permutations is achieved. This is 
-			helpful for any memory leaks. There should be anymore memory leaks now. The default 
-			chunk_size is quite large at 768, so there's probably minimal impact on performance. 
-			That is, it is safer to use chunking.
-		chunk_size : int, default = 768
-			The number of permutations per chunk. The default size is set as dividable by many 
-			different number of cores such as 8, 6, 12, and 16.
-			The number of permuations (total) will automatically adjust (increase in size) 
-			so n_permutations % chunk_size = 0.
-			For example, 2000 permutations ==> 2304 (3 chunks) or 10000 permutaions ==> 10752 (14 chunks).
-		stratification_blocks : None or np.array (ndim =1), default None
-			Shuffling within unique value of stratification block. 
-			while still allowing for a valid assessment of the null hypothesis. This is particularly 
-			useful when controlling for confounding variables or when dealing with clustered or 
-			hierarchical data.
-		"""
-		assert hasattr(self, 'adjacency_set_'), "Run calculate_tfce first"
-		
-		# Mode-specific preparations
-		if mode == 't':
-			assert contrast_index is not None, "contrast_index is required for t mode"
-			if self.memory_mapping_:
-				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
-				y = jload(self.memmap_y_name_, mmap_mode='r')
-			else:
-				y = self.y_
-			if whiten:
-				y = y - self.predict(self.X_)
-			X = self.X_
-		elif mode == 'mediation':
-			assert hasattr(self, 'mediation_z_tfce_positive_'), "Run calculate_mediation_z_tfce first"
-		elif mode == 'nested':
-			assert hasattr(self, 'adjacency_set_'), "Run calculate_nested_model_z_tfce first"
-			if self.memory_mapping_:
-				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
-				y = jload(self.memmap_y_name_, mmap_mode='r')
-			else:
-				y = self.y_
-			if whiten:
-				y = y - self.predict(self.X_)
-			X = self.X_
-			Xreduced = self.nested_model_Xreduced_
-		else:
-			raise ValueError(f"Unknown mode: {mode}. Use 't', 'mediation', or 'nested'")
-
-		if stratification_blocks is not None:
-			stratification_blocks = np.array(stratification_blocks)
-			assert stratification_blocks.ndim == 1, "Error: stratification_blocks.ndim must equal 1"
-
-		# Determine number of seeds based on mode
-		seeds_divisor = 2 if mode in ['t', 'mediation'] else 1
-		
-		if use_chunks:
-			tfce_maximum_values = []
-			if n_permutations % chunk_size != 0:
-				n_permutations += chunk_size - (n_permutations % chunk_size)
-			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			n_chunks = int(n_permutations/chunk_size)
-			for b in range(n_chunks):
-				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
-				seeds = generate_seeds(n_seeds=int(chunk_size/seeds_divisor))
-				
-				if mode == 't':
-					chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
-						delayed(self._run_tfce_t_permutation)(
-							i=i, 
-							X=X,
-							y=y, 
-							contrast_index=contrast_index,
-							H=self.tfce_H_,
-							E=self.tfce_E_,
-							adjacency_set=self.adjacency_set_,
-							mask_data=self.mask_data_,
-							stratification_arr=stratification_blocks,
-							seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
-				elif mode == 'mediation':
-					chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
-						delayed(self._run_tfce_mediation_z_permutation)(
-							i=i, 
-							exogA=self.mediation_exogA_,
-							endogA=self.mediation_endogA_,
-							exogB=self.mediation_exogB_,
-							endogB=self.mediation_endogB_,
-							H=self.tfce_H_,
-							E=self.tfce_E_,
-							adjacency_set=self.adjacency_set_,
-							mask_data=self.mask_data_,
-							stratification_arr=stratification_blocks,
-							seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
-				elif mode == 'nested':
-					chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
-						delayed(self._run_nested_z_tfce_permutation)(
-							i=i,
-							X=X,
-							Xreduced=Xreduced,
-							y=y,
-							H=self.tfce_H_,
-							E=self.tfce_E_,
-							adjacency_set=self.adjacency_set_,
-							mask_data=self.mask_data_,
-							stratification_arr=stratification_blocks,
-							seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
-					
-				tfce_maximum_values.append(chunk_tfce_maximum_values)
-			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
-		else:
-			seeds = generate_seeds(n_seeds=int(n_permutations/seeds_divisor))
-			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			if mode == 't':
-				tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
-					delayed(self._run_tfce_t_permutation)(
-						i=i, 
-						X=X,
-						y=y, 
-						contrast_index=contrast_index,
-						H=self.tfce_H_,
-						E=self.tfce_E_,
-						adjacency_set=self.adjacency_set_,
-						mask_data=self.mask_data_,
-						stratification_arr=stratification_blocks,
-						seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
-			elif mode == 'mediation':
-				tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
-					delayed(self._run_tfce_mediation_z_permutation)(
-						i=i, 
-						exogA=self.mediation_exogA_,
-						endogA=self.mediation_endogA_,
-						exogB=self.mediation_exogB_,
-						endogB=self.mediation_endogB_,
-						H=self.tfce_H_,
-						E=self.tfce_E_,
-						adjacency_set=self.adjacency_set_,
-						mask_data=self.mask_data_,
-						stratification_arr=stratification_blocks,
-						seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
-			elif mode == 'nested':
-				tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
-					delayed(self._run_nested_z_tfce_permutation)(
-						i=i,
-						X=X,
-						Xreduced=Xreduced,
-						y=y,
-						H=self.tfce_H_,
-						E=self.tfce_E_,
-						adjacency_set=self.adjacency_set_,
-						mask_data=self.mask_data_,
-						stratification_arr=stratification_blocks,
-						seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
-			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
-		if mode == 't':
-			self.t_tfce_max_permutations_ = np.array(tfce_maximum_values)
-		elif mode == 'mediation':
-			self.mediation_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
-		elif mode == 'nested':
-			self.nested_model_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
-
-	# permutation helper functions
 	def create_permutation_block_from_dataframe(self, stratification_variable):
 		"""
 		Creates a stratification array from the given variable in the DataFrame. 
@@ -2619,6 +2636,44 @@ class LinearRegressionModelMRI:
 			z_approx[f_stats < 0] = 0
 		return(z_approx)
 
+	def _calculate_permuted_pvalue(self, permuted_distribution_arr, statistic_arr):
+		"""
+		Calculates p-values of an array from a permuted distribution
+		
+		Parameters
+		----------
+		permuted_distribution_arr : np.ndarray, shape(n_permutations)
+			permuted statistic array
+		
+		statistic_arr : np.ndarray or str, shape(n_features)
+			statistic array
+		
+		Returns
+		---------
+		arr : np.ndarray
+			p-values of statistic array
+		"""
+		return(np.mean(permuted_distribution_arr[:, None] >= statistic_arr, axis=0, dtype=np.float32))
+
+	def print_t_contrast_indices(self):
+		"""
+		Print the indices of t-contrasts.
+
+		If the attribute 't_contrast_names_' exists, this function prints the index 
+		and corresponding contrast name. Otherwise, it prints the numeric indices 
+		for all available contrasts.
+
+		Parameters:
+		-----------
+		self : object
+			The instance containing 't_contrast_names_' and 't_' attributes.
+		"""
+		if hasattr(self, 't_contrast_names_'):
+			for t in range(len(self.t_contrast_names_)):
+				print("[index=%d] ==> %s" % (t, self.t_contrast_names_[t]))
+		else:
+			print(np.arange(self.t_.shape[0]))
+
 	def _calculate_beta_se(self, exog, endog, index_var = -1):
 		"""
 		Calculate the standard error for the coefficients using linear regression.
@@ -2669,46 +2724,6 @@ class LinearRegressionModelMRI:
 		beta_b, se_b = self._calculate_beta_se(exogB, endogB, index_var = -1)
 		sobel_z = beta_a*beta_b / np.sqrt((beta_b**2 * se_a**2) + (beta_a**2 * se_b**2))
 		return(sobel_z)
-
-	def outlier_detection(self, f_quantile = 0.99, low_ram = True, outlier_tolerance_count = 2):
-		"""
-		Detect outliers using Cook's distance. Cook's distance is defined as the coefficient vector would move 
-		if the sample were removed and the model refit.
-
-		Parameters
-		----------
-		f_quantile : float
-			The threshold for identifying outliers using the F-distribution.
-		outlier_tolerance_count : int, default outlier_tolerance_count=2.
-			The cutoff for the allowable number of outliers (i.e., outlier subjects). The percentage outlier will also be calculated.
-		low_ram : bool, default = True
-			Deletes self.residual_studentized_ and self.cooks_distance_ to save RAM
-		
-		Returns
-		-------
-		self : object
-			Model instance with detected outliers based on Cook's distance.
-		
-		Reference
-		-------
-		Cook, R. D. (1977). Detection of Influential Observation in Linear Regression. Technometrics, 19(1), 15–18. doi:10.1080/00401706.1977.10489493 
-		"""
-		assert hasattr(self, 'coef_'), "Run fit(X, y) first"
-		if not hasattr(self, 'residuals_'):
-			self.residuals_ = self.y_ - np.dot(self.X_, self.coef_)
-			self.sse_ = np.sum(self.residuals_**2, axis=0)
-			self.mse_ = np.divide(self.sse_, self.df_within_)
-		self.residuals_studentized_ = np.divide(np.divide(self.residuals_, np.sqrt(self.mse_)), np.sqrt(1 - self.leverage_))
-		self.cooks_distance_ = np.divide(self.residuals_studentized_**2, self.k_) * np.divide(self.leverage_, (1 -  self.leverage_))
-		self.cooks_distance_threshold_ = fdist.ppf(f_quantile, self.k_, (self.n_ - self.k_))
-		self.n_outliers_ = (self.cooks_distance_ > self.cooks_distance_threshold_).sum(0)
-		self.n_outliers_percentage_ = np.divide(self.n_outliers_ * 100, self.n_)
-		self.outlier_ = np.zeros((len(self.n_outliers_)), int)
-		self.outlier_[self.n_outliers_ > outlier_tolerance_count] = 1
-		if low_ram:
-			del self.residuals_studentized_ 
-			del self.cooks_distance_
-		return(self)
 
 	def _calculate_aic(self, llf, k):
 		"""Calculate Akaike Information Criterion (AIC) for a model.
@@ -2763,6 +2778,7 @@ class LinearRegressionModelMRI:
 		"""
 		return(-N/2 * (np.log(2 * np.pi) + np.log(rss / N) + 1))
 
+	# Results and visualization
 	# legacy
 	def write_t_tfce_results(self, ImageObjectMRI, contrast_index, write_surface_ply = False, surface_ply_vmin = 0.95, surface_ply_vmax = 1.0, force_max_tfce_direction = False):
 		"""
@@ -3270,6 +3286,7 @@ class LinearRegressionModelMRI:
 			outdata[data_mask==1] = values
 			nib.save(nib.Nifti1Image(outdata, affine), os.path.join(self.output_directory_, outname))
 
+	# Serialization
 	def save(self, filename):
 		"""
 		Saves a LinearRegressionModelMRI instance as a pickle file.
@@ -3309,7 +3326,6 @@ class LinearRegressionModelMRI:
 
 
 # additional functions
-
 def save_ply(v, f, outname, color_array=None, output_binary=True):
 	"""
 	Save vertex and face data to a PLY file.
@@ -4126,9 +4142,4 @@ def generate_orthographic_snapshot_ply(path_to_ply, output_base, output_filetype
 	plotter.reset_camera()
 	plotter.save_graphic(output_base + "_sagittal_left" + output_filetype)
 	plotter.close()
-
-
-
-
-
 
