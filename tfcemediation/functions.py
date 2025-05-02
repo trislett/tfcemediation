@@ -46,6 +46,36 @@ aseg_subcortical_files = np.sort(os.listdir(pack_directory))
 pack_directory = os.path.join(scriptwd, "tfcemediation", "static", "JHU-ICBM-Surf")
 jhu_white_matter_files = np.sort(os.listdir(pack_directory))
 
+def configure_threads(n_threads=1):
+	"""
+	Set the number of threads so it doesn't interfer with joblib higher-level parallelism. Call this at the very beginning 
+	of your script before any imports. Unfortunately, there is no perfect solution due to Python's import system. This 
+	function is very important in terms of processing time. It is best to n_threads=1, and then adjust the number of jobs 
+	with n_jobs.
+	
+	Example:
+	
+	from tfcemediation.functions import configure_threads
+	configure_threads(1)
+	
+	Parameters
+	----------
+	n_threads : int, default = None
+		Sets external parallel processing to use single core. So, n_jobs has complete control on
+		the number of threads being used. 
+	Returns
+	-------
+		None
+	"""
+	import os
+	os.environ["OMP_NUM_THREADS"] = str(n_threads)
+	os.environ["MKL_NUM_THREADS"] = str(n_threads)
+	os.environ["OPENBLAS_NUM_THREADS"] = str(n_threads)
+	os.environ["NUMEXPR_NUM_THREADS"] = str(n_threads)
+	os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_threads)
+
+
+
 def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	"""
 	Generates a list of random integer seeds.
@@ -1015,6 +1045,9 @@ class VoxelImage:
 				self.image_data_[:,s] = img_temp.get_fdata()[self.mask_data_==1]
 		else:
 			raise TypeError("image_path has to be a string or a list of strings")
+		# Ensure that all data values are finite
+		self.mask_data_ = self._finite_check(self.mask_data_)
+		self.image_data_ = self._finite_check(self.image_data_)
 
 	def _check_mask(self, mask_data, connectivity = 3):
 		"""
@@ -1062,6 +1095,26 @@ class VoxelImage:
 				largest_label = sizes.argmax()
 				mask_data == (labeled_array == largest_label)*1
 		return(mask_data)
+
+	def _finite_check(self, arr):
+		"""
+		Check that are not any nan in a numpy array. If nan present, set the value to zero.
+
+		Parameters
+		----------
+		arr : np.ndarray
+			input array
+		
+		Returns
+		-------
+		finite_arr : np.ndarray
+			output array with only finite values
+		"""
+
+		if np.sum(~np.isfinite(arr)) > 0:
+			warnings.warn("nan values detected. They will be set to zero.", UserWarning)
+			arr[~np.isfinite(arr)] = 0
+		return(arr)
 
 	def _create_adjacency_voxel(self, data_mask, connectivity_directions=26):
 		"""
@@ -1171,7 +1224,7 @@ class LinearRegressionModelMRI:
 	"""
 	Linear Regression Model
 	"""
-	def __init__(self, *, fit_intercept = True, n_jobs = 16, memory_mapping = False, use_tmp = True, fdr_correction = False):
+	def __init__(self, *, fit_intercept = True, n_jobs = 16, memory_mapping = False, use_tmp = True, fdr_correction = False, output_directory = None):
 		"""
 		Initialize the LinearRegressionModel instance.
 
@@ -1196,6 +1249,10 @@ class LinearRegressionModelMRI:
 		self.use_tmp_ = use_tmp
 		self.tmp_directory_ = os.environ.get("TMPDIR", "/tmp/")
 		self.fdr_correction_ = fdr_correction
+		if output_directory is not None:
+			self.output_directory_ = output_directory
+		else:
+			self.output_directory_ = "output_directory_%s" % datetime.datetime.now().strftime('%Y_%m_%d_%H%M')
 
 	def _check_inputs(self, X, y):
 		"""
@@ -1204,7 +1261,7 @@ class LinearRegressionModelMRI:
 		Parameters
 		----------
 		X : np.ndarray
-			Exogneous variables
+			Exogeneous variables
 			
 		y : np.ndarray
 			Endogenous variables
@@ -1223,6 +1280,12 @@ class LinearRegressionModelMRI:
 			X = X.reshape(-1,1)
 		if y.ndim == 1:
 			y = y.reshape(-1,1)
+		if np.sum(~np.isfinite(y)) > 0:
+			warnings.warn("nan values detected in y. They will be set to zero.", UserWarning)
+			y[~np.isfinite(y)] = 0
+		if np.sum(~np.isfinite(X)) > 0:
+			warnings.warn("nan values detected in y. They will be set to zero; however, this is a serious issue. Please check your exogenous variables.", UserWarning)
+			X[~np.isfinite(X)] = 0
 		return(X, y)
 	
 	def _stack_ones(self, arr):
@@ -1440,8 +1503,24 @@ class LinearRegressionModelMRI:
 		self.leverage_ = leverage
 		return(self)
 
-	# Calculate stats
+	def predict(self, X):
+		"""
+		Predict y values using the dot product of the coefficients.
+		
+		Parameters
+		----------
+		X : nd.array with shape (n_samples, n_features)
+			Exogenous variables to predict y (yhat).
+		Returns
+		-------
+		y_pred : ndarray of shape (n_samples,n_dependent_variables)
+			The predicted endogenous variables.
+		"""
+		if self.fit_intercept_ and np.mean(X[:, 0]) != 1:
+			X = self._stack_ones(X)
+		return(np.dot(X, self.coef_))
 
+	# Calculate stats
 	def calculate_tstatistics(self, calculate_probability = False):
 		"""
 		Calculate t-statistics for the model coefficients.
@@ -1504,14 +1583,17 @@ class LinearRegressionModelMRI:
 				self.f_qvalues_ = fdrcorrection(self.f_pvalues_)[1]
 		return(self)
 
-	def calculate_mediation_z_from_formula(self, mri_data, X = None, M = None, y = None, covariates = None, calculate_probability = True):
+	def calculate_mediation_z_from_formula(self, ImageObjectMRI, X = None, M = None, y = None, covariates = None, calculate_probability = True):
 		"""
 		Perform Sobel mediation analysis using the provided formulas.
 
 		Parameters
 		----------
-		mri_data : np.ndarray, shape (n_samples,)
-			MRI data.
+		ImageObjectMRI : object
+			MRI image object containing:
+			- image_data_: Image data  with shape(n_features, n_samples)
+			- mask_data_: Binary mask of valid voxels/vertices
+			- hemispheres_: (Optional) Present for surface-based data
 		X : np.ndarray, shape (n_samples, n_features), optional
 			Exogenous variable for the first stage in the mediation model.
 		M : np.ndarray, shape (n_samples, n_features), optional
@@ -1531,6 +1613,12 @@ class LinearRegressionModelMRI:
 		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
 		not_none_count = sum(val is not None for val in (X, M, y))
 		assert not_none_count == 2, "Two of X, M, and y must not be None"
+
+		mri_data = ImageObjectMRI.image_data_.T
+		if np.sum(~np.isfinite(mri_data)) > 0:
+			warnings.warn("nan values detected in ImageObjectMRI. They will be set to zero.", UserWarning)
+			mri_data[~np.isfinite(mri_data)] = 0
+
 		if X is not None:
 			varA = self.dummy_code_from_formula(X)
 			assert varA.shape[1]==1, "Currently only 1d variables are supported"
@@ -1589,13 +1677,13 @@ class LinearRegressionModelMRI:
 		calculate_log_ratio_test : bool, optional
 			If True, computes the Likelihood Ratio Test statistic (Chi-squared),
 			associated p-value (if 'calculate_probability' is True), and the
-			log-likelihood for both models. Required if 'use_aic' or 'use_bic'
+			log-likelihood for both models. Required if 'calculate_aic' or 'calculate_bic'
 			is True. Default is False.
-		use_aic : bool, optional
+		calculate_aic : bool, optional
 			If True (and 'calculate_log_ratio_test' is True), calculates the
 			difference in Akaike Information Criterion (AIC) between the full
 			and reduced models. Default is False.
-		use_bic : bool, optional
+		calculate_bic : bool, optional
 			If True (and 'calculate_log_ratio_test' is True), calculates the
 			difference in Bayesian Information Criterion (BIC) between the full
 			and reduced models. Default is False.
@@ -1657,7 +1745,7 @@ class LinearRegressionModelMRI:
 			Difference in AIC (AIC_full - AIC_reduced). Lower values favor the
 			full model relative to the reduced one after penalizing for
 			complexity. Shape (n_targets,). Only set if
-			'calculate_log_ratio_test=True' and 'use_aic=True'.
+			'calculate_log_ratio_test=True' and 'calculate_aic=True'.
 		nested_model_bic_difference_ : numpy.ndarray, optional
 			Difference in BIC (BIC_full - BIC_reduced). Lower values favor the
 			full model relative to the reduced one after penalizing for
@@ -1672,7 +1760,7 @@ class LinearRegressionModelMRI:
 			predictors than 'self.X_', or a different number of observations.
 			If predictors derived from 'reduced_formula' are not a subset of
 			the full model predictors ('self.t_contrast_names_').
-			If 'use_aic' or 'use_bic' is True but 'calculate_log_ratio_test'
+			If 'calculate_aic' or 'use_bic' is True but 'calculate_log_ratio_test'
 			is False.
 
 		Returns
@@ -1715,9 +1803,9 @@ class LinearRegressionModelMRI:
 			self.nested_model_log_ratio_chi2_ = -2*(self.log_likelihood_reduced_ - self.log_likelihood_)
 			self.nested_model_log_ratio_chi2_ = np.maximum(0, self.nested_model_log_ratio_chi2_)
 			if calculate_probability:
-				self.log_ratio_test_chi2_pvalues_ = chi2.sf(self.log_ratio_chi2_, df_num)
+				self.nested_model_log_ratio_test_chi2_pvalues_ = chi2.sf(self.nested_model_log_ratio_chi2_, df_num)
 				if self.fdr_correction_:
-					self.nested_model_log_ratio_test_chi2_qvalues_ = fdrcorrection(self.log_ratio_test_chi2_pvalues_)[1]
+					self.nested_model_log_ratio_test_chi2_qvalues_ = fdrcorrection(self.nested_model_log_ratio_test_chi2_pvalues_)[1]
 		if calculate_aic:
 			assert calculate_log_ratio_test, ("'calculate_log_ratio_test' must be True for calculating AIC difference")
 			self.nested_model_aic_difference_ = (self._calculate_aic(llf = self.log_likelihood_, k = int(self.X_.shape[1]+1)) - 
@@ -1818,204 +1906,6 @@ class LinearRegressionModelMRI:
 			del adjacency_set, vertStat_out_lh, vertStat_out_rh, vertStat_TFCE_lh, vertStat_TFCE_rh, calcTFCE_lh, calcTFCE_rh
 			gc.collect()
 			return(out_statistic_positive, out_statistic_negative)
-
-	#legacy
-	def calculate_tstatistics_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67, contrast = None):
-		"""
-		Computes Threshold-Free Cluster Enhancement (TFCE) enhanced t-statistics 
-		for both positive and negative contrasts.
-
-		This function applies the TFCE algorithm to enhance statistical maps 
-		by accounting for spatial adjacency relationships, improving sensitivity 
-		in neuroimaging analyses.
-
-		Parameters
-		----------
-		ImageObjectMRI : object
-			An instance containing neuroimaging data, including adjacency 
-			information and mask data.
-		H : float, optional
-			The height exponent for TFCE computation (default is 2.0).
-		E : float, optional
-			The extent exponent for TFCE computation (default is 0.67).
-		contrast : int, None
-			Set which contrast to calculate TFCE. Other contrasts will be zero.
-		Raises
-		------
-		AssertionError
-			If the t-statistics have not been computed before running TFCE.
-		
-		Returns
-		-------
-		self : object
-			The instance with updated attributes containing the computed 
-			TFCE-enhanced t-statistics for both positive and negative contrasts.
-		
-		Notes
-		-----
-		- If 'ImageObjectMRI' has a 'hemispheres_' attribute, TFCE is computed 
-		  using a surface-based approach.
-		- Otherwise, a voxel-based TFCE computation is performed using adjacency sets.
-		- The computed TFCE values are stored in 'self.t_tfce_positive_' and 
-		  'self.t_tfce_negative_'.
-		assert hasattr(self, 't_'), "Run calculate_tstatistics() first"
-		adjacency_set = ImageObjectMRI.adjacency_
-		"""
-		assert hasattr(ImageObjectMRI, 'adjacency_'), "ImageObjectMRI is missing adjacency_"
-		self.t_tfce_positive_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
-		self.t_tfce_negative_ = np.zeros((self.t_.shape)).astype(np.float32, order = "C")
-
-		iterator_ = np.arange(0, self.t_.shape[0])
-		if contrast is not None:
-			iterator_ = [iterator_[contrast]]
-
-		if hasattr(ImageObjectMRI, 'hemispheres_'):
-			for c in iterator_:
-				if np.sum(self.t_[c] > 0) < 100 or np.sum(self.t_[c] < 0) < 100:
-					print("The t-statistic is in the same direction for almost all vertices. Skipping TFCE calculation for Contrast-%d" % (c))
-				elif np.sum(np.abs(self.t_[c]) > 5) > int(self.t_[c].shape[0] * 0.90):
-					print("abs(t-values)>5 detected for >90 percent of the vertices. Skipping TFCE calculation for Contrast-%d" % (c))
-				else:
-					tfce_values =  self._calculate_surface_tfce(mask_data = ImageObjectMRI.mask_data_,
-																				statistic = self.t_[c].astype(np.float32, order = "C"),
-																				adjacency_set = ImageObjectMRI.adjacency_,
-																				H = H, E = E, return_max_tfce = False)
-					self.t_tfce_positive_[c] = tfce_values[0]
-					self.t_tfce_negative_[c] = tfce_values[1]
-		else:
-			calcTFCE = CreateAdjSet(H, E, ImageObjectMRI.adjacency_) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
-			for c in iterator_:
-				tval = self.t_[c]
-				stat = tval.astype(np.float32, order = "C")
-				stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-				calcTFCE.run(stat, stat_TFCE)
-				self.t_tfce_positive_[c] = stat_TFCE
-				stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-				calcTFCE.run(-stat, stat_TFCE)
-				self.t_tfce_negative_[c] = stat_TFCE
-		# for permutation testing
-		self.adjacency_set_ = ImageObjectMRI.adjacency_
-		self.mask_data_ = ImageObjectMRI.mask_data_
-		self.tfce_H_ = float(H)
-		self.tfce_E_ = float(E)
-		return(self)
-
-	#legacy
-	def calculate_mediation_z_tfce(self, ImageObjectMRI, H = 2., E = 0.6667):
-		"""
-		Compute TFCE-enhanced z-statistics for mediation analysis.
-		
-		Applies the Threshold-Free Cluster Enhancement (TFCE) algorithm to mediation z-score maps
-		using specified adjacency relationships. Computes both positive and negative enhancements.
-
-		Parameters
-		----------
-		ImageObjectMRI : object
-			MRI image object containing:
-			- mask_data_: Binary mask of valid voxels/vertices
-			- adjacency_: Adjacency relationship definitions
-			- hemispheres_: (Optional) Present for surface-based data
-		H : float, optional
-			Height exponent for TFCE computation (default=2.0).
-			Controls sensitivity to peak values.
-		E : float, optional
-			Extent exponent for TFCE computation (default=0.6667).
-			Controls sensitivity to cluster extent.
-		
-		Raises
-		------
-		AssertionError
-			If mediation z-scores haven't been computed (run calculate_mediation_z_from_formula first)
-		"""
-		assert hasattr(self, 'mediation_z_'), "Run calculate_tstatistics() first"
-		zval = self.mediation_z_.astype(np.float32, order = "C")
-
-		if hasattr(ImageObjectMRI, 'hemispheres_'):
-			tfce_values =  self._calculate_surface_tfce(mask_data = ImageObjectMRI.mask_data_,
-																		statistic = zval.astype(np.float32, order = "C"),
-																		adjacency_set = ImageObjectMRI.adjacency_,
-																		H = H, E = E,
-																		only_positive_contrast = False,
-																		return_max_tfce = False)
-			self.mediation_z_tfce_positive_ = tfce_values[0]
-			self.mediation_z_tfce_negative_ = tfce_values[1]
-		else:
-			calcTFCE = CreateAdjSet(H, E, ImageObjectMRI.adjacency_) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
-			stat = zval.astype(np.float32, order = "C")
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-			calcTFCE.run(stat, stat_TFCE)
-			self.mediation_z_tfce_positive_ = stat_TFCE
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-			calcTFCE.run(-stat, stat_TFCE)
-			self.mediation_z_tfce_negative_ = stat_TFCE
-
-		self.mask_data_ = ImageObjectMRI.mask_data_
-		self.adjacency_set_ = ImageObjectMRI.adjacency_
-		self.tfce_H_ = float(H)
-		self.tfce_E_ = float(E)
-		return(self)
-
-	#legacy
-	def calculate_nested_model_z_tfce(self, ImageObjectMRI, H = 2.0, E = 0.67):
-		"""
-		Computes Threshold-Free Cluster Enhancement (TFCE) for the approximate z-statistics 
-		from the difference between the full and reduced model (nested_model).
-
-		This function applies the TFCE algorithm to enhance statistical maps 
-		by accounting for spatial adjacency relationships, improving sensitivity 
-		in neuroimaging analyses.
-
-		Parameters
-		----------
-		ImageObjectMRI : object
-			An instance containing neuroimaging data, including adjacency 
-			information and mask data.
-		H : float, optional
-			The height exponent for TFCE computation (default is 2.0).
-		E : float, optional
-			The extent exponent for TFCE computation (default is 0.67).
-		Raises
-		------
-		AssertionError
-			If the z-statistics have not been computed before running TFCE.
-		
-		Returns
-		-------
-		self : object
-			The instance with updated attributes containing the computed 
-			TFCE-enhanced t-statistics for both positive and negative contrasts.
-		
-		Notes
-		-----
-		- If 'ImageObjectMRI' has a 'hemispheres_' attribute, TFCE is computed 
-		  using a surface-based approach.
-		- Otherwise, a voxel-based TFCE computation is performed using adjacency sets.
-		"""
-		assert hasattr(self, 'nested_model_z_'), "Run nested_model first with estimate_z_statistic = True"
-		assert hasattr(ImageObjectMRI, 'adjacency_'), "ImageObjectMRI is missing adjacency_"
-		self.nested_model_z_tfce_ = np.zeros((self.nested_model_z_.shape)).astype(np.float32, order = "C")
-
-		if hasattr(ImageObjectMRI, 'hemispheres_'):
-			tfce_values =  self._calculate_surface_tfce(mask_data = ImageObjectMRI.mask_data_,
-																		statistic = self.nested_model_z_.astype(np.float32, order = "C"),
-																		adjacency_set = ImageObjectMRI.adjacency_,
-																		H = H, E = E, return_max_tfce = False,
-																		only_positive_contrast = True)
-			self.nested_model_z_tfce_ = tfce_values
-		else:
-			calcTFCE = CreateAdjSet(H, E, ImageObjectMRI.adjacency_) # 18.7 ms; approximately 180s on 10k permutations => acceptable for voxel
-			zval = self.nested_model_z_
-			stat = zval.astype(np.float32, order = "C")
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-			calcTFCE.run(stat, stat_TFCE)
-			self.nested_model_z_tfce_ = stat_TFCE
-
-		# for permutation testing
-		self.adjacency_set_ = ImageObjectMRI.adjacency_
-		self.mask_data_ = ImageObjectMRI.mask_data_
-		self.tfce_H_ = float(H)
-		self.tfce_E_ = float(E)
-		return(self)
 
 	def calculate_statistics_tfce(self, ImageObjectMRI, mode, H = 2.0, E = 0.6667, contrast = None):
 		"""
@@ -2154,7 +2044,7 @@ class LinearRegressionModelMRI:
 				np.copyto(output_stat_pos, tfce_values)
 		else:
 			# --- Voxel-based TFCE ---
-			calcTFCE = self.CreateAdjSet(H, E, ImageObjectMRI.adjacency_)
+			calcTFCE = CreateAdjSet(H, E, ImageObjectMRI.adjacency_)
 			if mode == 't':
 				for c in iterator_:
 					current_stat = input_stat_array[c].astype(np.float32, order="C")
@@ -2449,250 +2339,6 @@ class LinearRegressionModelMRI:
 		del adjacency_set, stat, mask_data, X, Xreduced, y
 		gc.collect()
 		return(max_pos)
-
-	# legacy
-	def permute_tstatistics_tfce(self, contrast_index, n_permutations, whiten = True, use_chunks = True, chunk_size = 768, stratification_blocks = None):
-		"""
-		Performs TFCE-based permutation testing for a given contrast index.
-		
-		This function computes t-statistic permutations and applies TFCE correction
-		to obtain the maximum TFCE values across permutations.
-
-		Parameters
-		----------
-		contrast_index : int
-			The index of the contrast for permutation testing.
-		n_permutations : int
-			The number of permutations to perform.
-		whiten : bool, optional
-			Whether to whiten the residuals before permutation (default is True).
-		use_chunks : bool, default True
-			Whether to use chunks for the permutation analysis. At the end of each chunk parallel processing stops and restarts until the 
-			desired n_permutations is achieved. This is helpful for any memory leaks. There should be anymore memory leaks now. The default 
-			chunk_size is quite large at 768, so there's probably minimal impact on performance. That is, it is safer to use chunking.
-		chunk_size : int, default = 768
-			The number of permutations per chunk. The default size is set as dividable by many different number of cores such as 8, 6, 12, and 16.
-			The number of permuations (total) will automatically adjust (increase in size) so n_permutations % chunk_size = 0.
-			For example, 2000 permutations ==> 2304 (3 chunks) or 10000 permutaions ==> 10752 (14 chunks).
-		stratification_blocks : None or np.array (ndim =1), default None
-			Shuffling within unique value of stratification block. 
-			while still allowing for a valid assessment of the null hypothesis. This is particularly useful when controlling for confounding variables
-			or when dealing with clustered or hierarchical data.
-		"""
-		assert hasattr(self, 'adjacency_set_'), "Run calculate_tstatistics_tfce first"
-		if self.memory_mapping_:
-			assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
-			y = jload(self.memmap_y_name_, mmap_mode='r')
-		else:
-			y = self.y_
-		if stratification_blocks is not None:
-			stratification_blocks = np.array(stratification_blocks)
-			assert stratification_blocks.ndim == 1, "Error: stratification_blocks.ndim must equal 1"
-		if whiten:
-			y = y - self.predict(self.X_)
-		X = self.X_
-		if use_chunks:
-			tfce_maximum_values = []
-			if not n_permutations % chunk_size == 0:
-				res = n_permutations % chunk_size
-				n_permutations += (chunk_size - res)
-			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			n_chunks = int(n_permutations/chunk_size)
-			for b in range(n_chunks):
-				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
-				seeds = generate_seeds(n_seeds = int(chunk_size/2))
-				chunk_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-														delayed(self._run_tfce_t_permutation)(i = i, 
-																						X = X,
-																						y = y, 
-																						contrast_index = contrast_index,
-																						H = self.tfce_H_,
-																						E = self.tfce_E_,
-																						adjacency_set = self.adjacency_set_,
-																						mask_data = self.mask_data_,
-																						stratification_arr = stratification_blocks,
-																						seed = seeds[i]) for i in tqdm(range(int(chunk_size/2))))
-				tfce_maximum_values.append(chunk_tfce_maximum_values)
-			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
-		else:
-			seeds = generate_seeds(n_seeds = int(n_permutations/2))
-			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			seeds = generate_seeds(n_seeds = int(n_permutations/2))
-			tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-													delayed(self._run_tfce_t_permutation)(i = i, 
-																					X = X,
-																					y = y, 
-																					contrast_index = contrast_index,
-																					H = self.tfce_H_,
-																					E = self.tfce_E_,
-																					adjacency_set = self.adjacency_set_,
-																					mask_data = self.mask_data_,
-																					stratification_arr = stratification_blocks,
-																					seed = seeds[i]) for i in tqdm(range(int(n_permutations/2))))
-			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
-		self.t_tfce_max_permutations_ = tfce_maximum_values
-
-	# legacy
-	def permute_mediation_z_tfce(self, n_permutations, use_chunks=True, chunk_size=768, stratification_blocks=None):
-		"""
-		Perform TFCE-based permutation testing for mediation z-scores.
-
-		This method runs a series of permutations, computes Sobel z-scores, and applies the TFCE 
-		(Threshold-Free Cluster Enhancement) correction to obtain the maximum TFCE values across permutations.
-
-		Parameters
-		----------
-		n_permutations : int
-			The number of permutations to perform in the permutation testing process.
-		use_chunks : bool, default True
-			Whether to process permutations in chunks to prevent memory issues. Each chunk completes
-			before starting the next. The default chunk_size (768) is chosen for good divisibility
-			across common core counts (8, 12, 16, etc.).
-		chunk_size : int, default 768
-			Number of permutations per chunk. Total permutations will be adjusted up to the nearest
-			multiple of chunk_size. For example:
-			- 2000 permutations → 2304 (3 chunks)
-			- 10000 permutations → 10752 (14 chunks)
-		stratification_blocks : array-like or None, default None
-			Array defining blocks for constrained permutations. Permutations are performed within
-			each block to control for confounding variables or clustered data structures.
-
-		Returns
-		-------
-		None
-			Updates the 'mediation_z_tfce_max_permutations_' attribute with maximum TFCE values
-			from all permutations.
-		"""
-		assert hasattr(self, 'adjacency_set_'), "Run calculate_mediation_z_from_formula first"
-		assert hasattr(self, 'mediation_z_tfce_positive_'), "Run calculate_mediation_z_tfce first"
-
-		if use_chunks:
-			tfce_maximum_values = []
-			if n_permutations % chunk_size != 0:
-				n_permutations += chunk_size - (n_permutations % chunk_size)
-			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			n_chunks = int(n_permutations/chunk_size)
-			for b in range(n_chunks):
-				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
-				seeds = generate_seeds(n_seeds = int(chunk_size/2))
-				chunk_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-														delayed(self._run_tfce_mediation_z_permutation)(i = i, 
-																						exogA = self.mediation_exogA_,
-																						endogA = self.mediation_endogA_,
-																						exogB = self.mediation_exogB_,
-																						endogB = self.mediation_endogB_,
-																						H = self.tfce_H_,
-																						E = self.tfce_E_,
-																						adjacency_set = self.adjacency_set_,
-																						mask_data = self.mask_data_,
-																						stratification_arr = stratification_blocks,
-																						seed = seeds[i]) for i in tqdm(range(int(chunk_size/2))))
-				tfce_maximum_values.append(chunk_tfce_maximum_values)
-			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
-		else:
-			seeds = generate_seeds(n_seeds = int(n_permutations/2))
-			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			seeds = generate_seeds(n_seeds = int(n_permutations/2))
-			tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-													delayed(self._run_tfce_mediation_z_permutation)(i = i, 
-																					exogA = self.mediation_exogA_,
-																					endogA = self.mediation_endogA_,
-																					exogB = self.mediation_exogB_,
-																					endogB = self.mediation_endogB_,
-																					H = self.tfce_H_,
-																					E = self.tfce_E_,
-																					adjacency_set = self.adjacency_set_,
-																					mask_data = self.mask_data_,
-																					stratification_arr = stratification_blocks,
-																					seed = seeds[i]) for i in tqdm(range(int(n_permutations/2))))
-			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
-		self.mediation_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
-
-	# legacy
-	def permute_nested_model_tfce(self, n_permutations, whiten = True, use_chunks = True, chunk_size = 768, stratification_blocks = None):
-		"""
-		Performs TFCE-based permutation testing for a given contrast index.
-		
-		This function computes t-statistic permutations and applies TFCE correction
-		to obtain the maximum TFCE values across permutations.
-
-		Parameters
-		----------
-		n_permutations : int
-			The number of permutations to perform.
-		whiten : bool, optional
-			Whether to whiten the residuals before permutation (default is True).
-		use_chunks : bool, default True
-			Whether to use chunks for the permutation analysis. At the end of each chunk parallel processing stops and restarts until the 
-			desired n_permutations is achieved. This is helpful for any memory leaks. There should be anymore memory leaks now. The default 
-			chunk_size is quite large at 768, so there's probably minimal impact on performance. That is, it is safer to use chunking.
-		chunk_size : int, default = 768
-			The number of permutations per chunk. The default size is set as dividable by many different number of cores such as 8, 6, 12, and 16.
-			The number of permuations (total) will automatically adjust (increase in size) so n_permutations % chunk_size = 0.
-			For example, 2000 permutations ==> 2304 (3 chunks) or 10000 permutaions ==> 10752 (14 chunks).
-		stratification_blocks : None or np.array (ndim =1), default None
-			Shuffling within unique value of stratification block. 
-			while still allowing for a valid assessment of the null hypothesis. This is particularly useful when controlling for confounding variables
-			or when dealing with clustered or hierarchical data.
-
-		Returns
-		----------
-			None.
-		"""
-		assert hasattr(self, 'adjacency_set_'), "Run calculate_nested_model_z_tfce first"
-		if self.memory_mapping_:
-			assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
-			y = jload(self.memmap_y_name_, mmap_mode='r')
-		else:
-			y = self.y_
-		if stratification_blocks is not None:
-			stratification_blocks = np.array(stratification_blocks)
-			assert stratification_blocks.ndim == 1, "Error: stratification_blocks.ndim must equal 1"
-		if whiten:
-			y = y - self.predict(self.X_)
-		X = self.X_
-		Xreduced = self.nested_model_Xreduced_
-
-		if use_chunks:
-			tfce_maximum_values = []
-			if not n_permutations % chunk_size == 0:
-				res = n_permutations % chunk_size
-				n_permutations += (chunk_size - res)
-			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			n_chunks = int(n_permutations/chunk_size)
-			for b in range(n_chunks):
-				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
-				seeds = generate_seeds(n_seeds = int(chunk_size))
-				chunk_tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-														delayed(self._run_nested_z_tfce_permutation)(i = i,
-																						X = X,
-																						Xreduced = Xreduced,
-																						y = y,
-																						H = self.tfce_H_,
-																						E = self.tfce_E_,
-																						adjacency_set = self.adjacency_set_,
-																						mask_data = self.mask_data_,
-																						stratification_arr = stratification_blocks,
-																						seed = seeds[i]) for i in tqdm(range(int(chunk_size))))
-				tfce_maximum_values.append(chunk_tfce_maximum_values)
-			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
-		else:
-			seeds = generate_seeds(n_seeds = int(n_permutations))
-			print("Running %d permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
-			seeds = generate_seeds(n_seeds = int(n_permutations))
-			tfce_maximum_values = Parallel(n_jobs = self.n_jobs_, backend='multiprocessing')(
-														delayed(self._run_nested_z_tfce_permutation)(i = i,
-																						X = X,
-																						Xreduced = Xreduced,
-																						y = y,
-																						H = self.tfce_H_,
-																						E = self.tfce_E_,
-																						adjacency_set = self.adjacency_set_,
-																						mask_data = self.mask_data_,
-																						stratification_arr = stratification_blocks,
-																						seed = seeds[i]) for i in tqdm(range(int(n_permutations))))
-			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
-		self.nested_model_z_tfce_max_permutations_ = tfce_maximum_values
 
 	def permute_tfce(self, mode, n_permutations, contrast_index=None, whiten=True, use_chunks=True, 
 					 chunk_size=768, stratification_blocks=None):
@@ -3183,7 +2829,7 @@ class LinearRegressionModelMRI:
 			if write_surface_ply:
 				write_cortical_surface_results_to_ply(positive_scalar_array = oneminuspfwe_pos,
 																	ImageObjectMRI = ImageObjectMRI,
-																	outname = contrast_name + "-tfce-1minusp.ply",
+																	outname = os.path.join(self.output_directory_, contrast_name + "-tfce-1minusp.ply"),
 																	negative_scalar_array = oneminuspfwe_neg,
 																	vmin = surface_ply_vmin,
 																	vmax = surface_ply_vmax,
@@ -3258,7 +2904,7 @@ class LinearRegressionModelMRI:
 			if write_surface_ply:
 				write_cortical_surface_results_to_ply(positive_scalar_array = oneminuspfwe_pos,
 										ImageObjectMRI = ImageObjectMRI,
-										outname = contrast_name + "-tfce-1minusp.ply",
+										outname = os.path.join(self.output_directory_, contrast_name + "-tfce-1minusp.ply"),
 										negative_scalar_array = oneminuspfwe_neg,
 										vmin = surface_ply_vmin,
 										vmax = surface_ply_vmax,
@@ -3310,10 +2956,12 @@ class LinearRegressionModelMRI:
 			midpoint = data_mask[0].sum()
 			outdata = np.zeros((data_mask[0].shape[0]))
 			outdata[data_mask[0]==1] = values[:midpoint]
-			nib.save(nib.freesurfer.mghformat.MGHImage(outdata[:,np.newaxis, np.newaxis].astype(np.float32), affine[0]), outname[:-4] + ".lh.mgh")
+			outname_lh = os.path.join(self.output_directory_, outname[:-4] + ".lh.mgh")
+			nib.save(nib.freesurfer.mghformat.MGHImage(outdata[:,np.newaxis, np.newaxis].astype(np.float32), affine[0]), outname_lh)
 			outdata.fill(0)
 			outdata[data_mask[1]==1] = values[midpoint:]
-			nib.save(nib.freesurfer.mghformat.MGHImage(outdata[:,np.newaxis, np.newaxis].astype(np.float32), affine[1]), outname[:-4] + ".rh.mgh")
+			outname_rh = os.path.join(self.output_directory_, outname[:-4] + ".rh.mgh")
+			nib.save(nib.freesurfer.mghformat.MGHImage(outdata[:,np.newaxis, np.newaxis].astype(np.float32), affine[1]), outname_rh)
 
 	def write_nibabel_image(self, values, data_mask, affine, outname):
 		"""
@@ -3335,24 +2983,7 @@ class LinearRegressionModelMRI:
 		if outname.endswith(".nii.gz"):
 			outdata = np.zeros((data_mask.shape))
 			outdata[data_mask==1] = values
-			nib.save(nib.Nifti1Image(outdata, affine), outname)
-
-	def predict(self, X):
-		"""
-		Predict y values using the dot product of the coefficients.
-		
-		Parameters
-		----------
-		X : nd.array with shape (n_samples, n_features)
-			Exogenous variables to predict y (yhat).
-		Returns
-		-------
-		y_pred : ndarray of shape (n_samples,n_dependent_variables)
-			The predicted endogenous variables.
-		"""
-		if self.fit_intercept_ and np.mean(X[:, 0]) != 1:
-			X = self._stack_ones(X)
-		return(np.dot(X, self.coef_))
+			nib.save(nib.Nifti1Image(outdata, affine), os.path.join(self.output_directory_, outname))
 
 	def save(self, filename):
 		"""
