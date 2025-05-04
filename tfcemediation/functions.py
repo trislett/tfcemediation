@@ -31,7 +31,8 @@ from tfcemediation.adjacency import compute
 from tfcemediation.cynumstats import cy_lin_lstsqr_mat, fast_se_of_slope
 from patsy import dmatrix
 from scipy.ndimage import label as scipy_label
-from scipy.ndimage import generate_binary_structure
+from scipy.ndimage import generate_binary_structure, convolve
+from skimage.measure import marching_cubes
 
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, ListedColormap, Normalize
@@ -2779,243 +2780,6 @@ class LinearRegressionModelMRI:
 		return(-N/2 * (np.log(2 * np.pi) + np.log(rss / N) + 1))
 
 	# Results and visualization
-	# legacy
-	def write_t_tfce_results(self, ImageObjectMRI, contrast_index, write_surface_ply = False, surface_ply_vmin = 0.95, surface_ply_vmax = 1.0, force_max_tfce_direction = False):
-		"""
-		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
-		
-		This function saves multiple NIfTI or mgh scalar images containing the t-values, positive and negative
-		TFCE values, and their respective corrected p-values.
-
-		Parameters
-		----------
-		contrast_index : int
-			The index of the contrast for which TFCE results will be written.
-		data_mask : numpy.ndarray
-			A binary mask indicating valid data points in the brain image.
-		affine : numpy.ndarray
-			The affine transformation matrix for the NIfTI images.
-		force_max_tfce_direction : bool, Default = False
-			Advanced feature used only when there is bias in the permutated null distribution due to stratification_blocks. 
-		Raises
-		------
-		AssertionError
-			If the required TFCE permutations have not been computed.
-		"""
-		assert hasattr(self, 't_tfce_max_permutations_'), "Run permute_tstatistics_tfce first"
-
-		# order is maintained for TFCE output
-		if force_max_tfce_direction:
-			max_tfce_arr_index = np.arange(len(self.t_tfce_max_permutations_))
-			even_index = max_tfce_arr_index % 2 == 0
-			t_tfce_max_permutations_pos = self.t_tfce_max_permutations_[even_index]
-			t_tfce_max_permutations_neg = self.t_tfce_max_permutations_[~even_index]
-		else:
-			t_tfce_max_permutations_pos = self.t_tfce_max_permutations_
-			t_tfce_max_permutations_neg = self.t_tfce_max_permutations_
-
-		# FWER accuracy
-		accuracy =	{
-			"n_permutations": len(t_tfce_max_permutations_pos),
-			"p": 0.05,
-			"confidence +/- ": "%1.6f" % (2*np.sqrt(0.05*(1-0.05)/len(t_tfce_max_permutations_pos))),
-			"margin-of-error": "%1.3f" % np.divide((2*np.sqrt(0.05*(1-0.05)/len(t_tfce_max_permutations_pos))), 0.05)
-		}
-		self.t_tfce_permutation_accuracy_ = accuracy
-
-		if hasattr(self, 't_contrast_names_') and self.t_.shape[0] == len(self.t_contrast_names_):
-			contrast_name = "tvalue-%s" % self.t_contrast_names_[int(contrast_index)]
-		else:
-			contrast_name = "tvalue-con%d" % np.arange(0, len(self.t_),1)[int(contrast_index)]
-
-		if not hasattr(self, 't_tfce_positive_oneminusp_'):
-			self.t_tfce_positive_oneminusp_ = np.zeros_like(self.t_tfce_positive_)
-			self.t_tfce_negative_oneminusp_ = np.zeros_like(self.t_tfce_negative_)
-
-		data_mask = ImageObjectMRI.mask_data_
-		affine = ImageObjectMRI.affine_
-		values = self.t_[contrast_index]
-		if len(data_mask) == 2:
-			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".mgh")
-			values = self.t_tfce_positive_[contrast_index]
-			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.mgh")
-			oneminuspfwe_pos = 1 - self._calculate_permuted_pvalue(t_tfce_max_permutations_pos,values)
-			self.write_freesurfer_image(values = oneminuspfwe_pos, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.mgh")
-
-			values = self.t_tfce_negative_[contrast_index]
-			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.mgh")
-			oneminuspfwe_neg = 1 - self._calculate_permuted_pvalue(t_tfce_max_permutations_neg, values)
-			self.write_freesurfer_image(values = oneminuspfwe_neg, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.mgh")
-			if write_surface_ply:
-				write_cortical_surface_results_to_ply(positive_scalar_array = oneminuspfwe_pos,
-																	ImageObjectMRI = ImageObjectMRI,
-																	outname = os.path.join(self.output_directory_, contrast_name + "-tfce-1minusp.ply"),
-																	negative_scalar_array = oneminuspfwe_neg,
-																	vmin = surface_ply_vmin,
-																	vmax = surface_ply_vmax,
-																	lh_srf_path = os.path.join(static_directory, 'lh.midthickness.srf'),
-																	rh_srf_path = os.path.join(static_directory, 'rh.midthickness.srf'),
-																	perform_surface_smoothing = True, n_smoothing_iterations = 50,
-																	positive_cmap='red-yellow',
-																	negative_cmap='blue-lightblue')
-		else:
-			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
-			values = self.t_tfce_positive_[contrast_index]
-			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.nii.gz")
-			oneminuspfwe_pos = 1 - self._calculate_permuted_pvalue(t_tfce_max_permutations_pos,values)
-			self.write_nibabel_image(values = oneminuspfwe_pos, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.nii.gz")
-
-			values = self.t_tfce_negative_[contrast_index]
-			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.nii.gz")
-			oneminuspfwe_neg = 1 - self._calculate_permuted_pvalue(t_tfce_max_permutations_neg, values)
-			self.write_nibabel_image(values = oneminuspfwe_neg, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
-		self.t_tfce_positive_oneminusp_[contrast_index] = oneminuspfwe_pos
-		self.t_tfce_negative_oneminusp_[contrast_index] = oneminuspfwe_neg
-
-	# legacy
-	def write_nested_tfce_results(self, ImageObjectMRI, write_surface_ply = False, surface_ply_vmin = 0.95, surface_ply_vmax = 1.0):
-		"""
-		Writes the Threshold-Free Cluster Enhancement (TFCE) results for a given contrast index.
-		
-		This function saves multiple NIfTI or mgh scalar images containing the t-values, positive and negative
-		TFCE values, and their respective corrected p-values.
-
-		Parameters
-		----------
-		contrast_index : int
-			The index of the contrast for which TFCE results will be written.
-		data_mask : numpy.ndarray
-			A binary mask indicating valid data points in the brain image.
-		affine : numpy.ndarray
-			The affine transformation matrix for the NIfTI images.
-		force_max_tfce_direction : bool, Default = False
-			Advanced feature used only when there is bias in the permutated null distribution due to stratification_blocks. 
-		Raises
-		------
-		AssertionError
-			If the required TFCE permutations have not been computed.
-		"""
-		assert hasattr(self, 'nested_model_z_tfce_max_permutations_'), "Run permute_tfce with mode='nested'"
-
-		nested_model_z_tfce_max_permutations = self.nested_model_z_tfce_max_permutations_
-
-		# FWER accuracy
-		accuracy =	{
-			"n_permutations": len(nested_model_z_tfce_max_permutations),
-			"p": 0.05,
-			"confidence +/- ": "%1.6f" % (2*np.sqrt(0.05*(1-0.05)/len(nested_model_z_tfce_max_permutations))),
-			"margin-of-error": "%1.3f" % np.divide((2*np.sqrt(0.05*(1-0.05)/len(nested_model_z_tfce_max_permutations))), 0.05)
-		}
-		self.nested_model_z_tfce_permutation_accuracy_ = accuracy
-		contrast_name = "nested-zvalue"
-
-		self.nested_model_z_tfce_oneminusp_ = np.zeros_like(self.nested_model_z_)
-		
-		data_mask = ImageObjectMRI.mask_data_
-		affine = ImageObjectMRI.affine_
-		values = self.nested_model_z_
-		if len(data_mask) == 2:
-			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".mgh")
-			values = self.nested_model_z_tfce_
-			self.write_freesurfer_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce.mgh")
-			oneminuspfwe = 1 - self._calculate_permuted_pvalue(nested_model_z_tfce_max_permutations, values)
-			self.write_freesurfer_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce-1minusp.mgh")
-
-			if write_surface_ply:
-				write_cortical_surface_results_to_ply(positive_scalar_array = oneminuspfwe,
-																	ImageObjectMRI = ImageObjectMRI,
-																	outname = os.path.join(self.output_directory_, contrast_name + "-tfce-1minusp.ply"),
-																	negative_scalar_array = None,
-																	vmin = surface_ply_vmin,
-																	vmax = surface_ply_vmax,
-																	lh_srf_path = os.path.join(static_directory, 'lh.midthickness.srf'),
-																	rh_srf_path = os.path.join(static_directory, 'rh.midthickness.srf'),
-																	perform_surface_smoothing = True, n_smoothing_iterations = 50,
-																	positive_cmap='red-yellow',
-																	negative_cmap='blue-lightblue')
-		else:
-			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
-			values = self.nested_model_z_tfce_
-			self.write_nibabel_image(values = values, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce.nii.gz")
-			oneminuspfwe = 1 - self._calculate_permuted_pvalue(nested_model_z_tfce_max_permutations, values)
-			self.write_nibabel_image(values = oneminuspfwe, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce-1minusp.nii.gz")
-		self.t_tfce_oneminusp_ = oneminuspfwe
-
-	# legacy
-	def write_mediation_z_tfce_results(self, ImageObjectMRI, write_surface_ply = False, surface_ply_vmin = 0.95, surface_ply_vmax = 1.0):
-		"""
-		Writes the Threshold-Free Cluster Enhancement (TFCE) results for mediation Z-scores.
-		
-		This function saves multiple NIfTI or mgh scalar images containing the Z-values, positive and negative
-		TFCE values, and their respective corrected p-values.
-
-		Parameters
-		----------
-		ImageObjectMRI : object
-			An MRI image object containing mask data and affine transformation.
-		write_surface_ply : bool, optional
-			Whether to write surface PLY files for visualization (default: False).
-		surface_ply_vmin : float, optional
-			Minimum value threshold for surface visualization (default: 0.95).
-		surface_ply_vmax : float, optional
-			Maximum value threshold for surface visualization (default: 1.0).
-
-		Raises
-		------
-		AssertionError
-			If the required TFCE permutations have not been computed.
-		
-		Notes
-		-----
-		This function assumes that the permutation-based TFCE analysis has been run, and the
-		resulting data is available in 'mediation_z_tfce_max_permutations_' and 'mediation_z_tfce_'.
-		The function also calls 'write_nibabel_image' to save the generated images.
-		"""
-		assert hasattr(self, 'mediation_z_tfce_positive_'), "Run calculate_mediation_z_tfce first"
-		assert hasattr(self, 'mediation_z_tfce_max_permutations_'), "Run permute_mediation_z_tfce first"
-		contrast_name = "mediation_z"
-
-		if not hasattr(self, 'mediation_z_tfce_positive_oneminusp_'):
-			self.mediation_z_tfce_positive_oneminusp_ = np.zeros_like(self.mediation_z_tfce_positive_)
-			self.mediation_z_tfce_negative_oneminusp_ = np.zeros_like(self.mediation_z_tfce_negative_)
-
-		data_mask = ImageObjectMRI.mask_data_
-		affine = ImageObjectMRI.affine_
-		if len(data_mask) == 2:
-			self.write_freesurfer_image(values=self.mediation_z_, data_mask=data_mask, affine=affine, outname=contrast_name + ".mgh")
-			# Positive TFCE
-			self.write_freesurfer_image(values=self.mediation_z_tfce_positive_, data_mask=data_mask, affine=affine, outname=contrast_name + "-tfce_positive.mgh")
-			oneminuspfwe_pos = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_, self.mediation_z_tfce_positive_)
-			self.write_freesurfer_image(values=oneminuspfwe_pos, data_mask=data_mask, affine=affine, outname=contrast_name + "-tfce_positive-1minusp.mgh")
-			# Negative TFCE
-			self.write_freesurfer_image(values=self.mediation_z_tfce_negative_, data_mask=data_mask, affine=affine, outname=contrast_name + "-tfce_negative.mgh")
-			oneminuspfwe_neg = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_, self.mediation_z_tfce_negative_)
-			self.write_freesurfer_image(values=oneminuspfwe_neg, data_mask=data_mask, affine=affine, outname=contrast_name + "-tfce_negative-1minusp.mgh")
-			if write_surface_ply:
-				write_cortical_surface_results_to_ply(positive_scalar_array = oneminuspfwe_pos,
-										ImageObjectMRI = ImageObjectMRI,
-										outname = os.path.join(self.output_directory_, contrast_name + "-tfce-1minusp.ply"),
-										negative_scalar_array = oneminuspfwe_neg,
-										vmin = surface_ply_vmin,
-										vmax = surface_ply_vmax,
-										lh_srf_path = os.path.join(static_directory, 'lh.midthickness.srf'),
-										rh_srf_path = os.path.join(static_directory, 'rh.midthickness.srf'),
-										perform_surface_smoothing = True, n_smoothing_iterations = 50,
-										positive_cmap='red-yellow',
-										negative_cmap='blue-lightblue')
-		else:
-			self.write_nibabel_image(values = self.mediation_z_, data_mask = data_mask, affine = affine, outname = contrast_name + ".nii.gz")
-			# Positive TFCE
-			self.write_nibabel_image(values = self.mediation_z_tfce_positive_, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive.nii.gz")
-			oneminuspfwe_pos = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_,self.mediation_z_tfce_positive_)
-			self.write_nibabel_image(values = oneminuspfwe_pos, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_positive-1minusp.nii.gz")
-			 # Negative TFCE
-			self.write_nibabel_image(values = self.mediation_z_tfce_negative_, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative.nii.gz")
-			oneminuspfwe_neg = 1 - self._calculate_permuted_pvalue(self.mediation_z_tfce_max_permutations_, self.mediation_z_tfce_negative_)
-			self.write_nibabel_image(values = oneminuspfwe_neg, data_mask = data_mask, affine = affine, outname = contrast_name + "-tfce_negative-1minusp.nii.gz")
-		self.mediation_z_tfce_positive_oneminusp_ = oneminuspfwe_pos
-		self.mediation_z_tfce_negative_oneminusp_ = oneminuspfwe_neg
-
 	def write_tfce_results(self, ImageObjectMRI, mode='t', contrast_index=None, write_surface_ply=False, surface_ply_vmin=0.95, surface_ply_vmax=1.0, force_max_tfce_direction=False):
 		"""
 		Writes the Threshold-Free Cluster Enhancement (TFCE) results based on the specified mode.
@@ -3994,6 +3758,93 @@ def write_cortical_surface_results_to_ply(positive_scalar_array, ImageObjectMRI,
 	outdata[ImageObjectMRI.mask_data_[1] == 1] = color_arr[np.sum(ImageObjectMRI.mask_data_[0] == 1):]
 	save_ply(v_rh, f_rh, outname[:-4] + ".rh.ply", color_array=outdata, output_binary=True)
 
+def mri_voxels_to_mesh(voxel_data, threshold=0.95, vmin=-1.0, vmax=1.0, clip = True, voxel_alpha=0.7, cmap_name='red-yellow', 
+						surface_names=None, surface_alpha=0.2, mask_data = None, 
+						mask_color='white', mask_alpha=0.2):
+	"""
+	Convert voxel-wise MRI statistics to a 3D mesh representation with brain surfaces and mask surface.
+	
+	Parameters:
+	-----------
+	voxel_data : numpy.ndarray
+		3D array containing the voxel values
+	threshold : float
+		Minimum value for a voxel to be displayed (default: 0.95)
+	voxel_alpha : float
+		Transparency level for voxels between 0 and 1 (default: 0.7)
+	cmap_name : str
+		Name of the colormap to use (default: 'red-yellow')
+	surface_names : list
+		List of surface names to load and display
+	surface_alpha : float
+		Transparency level for brain surfaces between 0 and 1 (default: 0.2)
+	mask_data : numpy.ndarray
+		3D array containing the mask (non-zero values indicate the mask)
+	mask_color : str or tuple
+		Color for the mask surface (default: 'white')
+	mask_alpha : float
+		Transparency for the mask surface (default: 0.2)
+	
+	Returns:
+	--------
+	plotter : pyvista.Plotter
+		PyVista plotter object with the mesh visualization
+	"""
+
+	cmap_positive = ListedColormap(get_cmap_array(cmap_name)/255)
+	
+	# Create a PyVista plotter
+	plotter = pv.Plotter()
+	
+	x_indices, y_indices, z_indices = np.where(voxel_data > threshold)
+	#clip the top and bottom values for normalization
+	if clip:
+		values = np.clip(voxel_data[x_indices, y_indices, z_indices], vmin, vmax)
+	else:
+		values = voxel_data[x_indices, y_indices, z_indices]
+	# Normalize values for coloring
+	if len(values) > 0:
+		norm_values = (values - np.min(values)) / (np.max(values) - np.min(values))
+		for i in range(len(x_indices)):
+			x, y, z = x_indices[i], y_indices[i], z_indices[i]
+			val = norm_values[i]
+			cube = pv.Cube(center=(x, y, z), x_length=1, y_length=1, z_length=1)
+			color = cmap_positive(val)
+			plotter.add_mesh(cube, color=color[:3], opacity=voxel_alpha)
+	
+	# Add brain surfaces if provided
+	if surface_names:
+		for sn in surface_names:
+			vertices, faces = load_surface_geometry(sn)
+			faces_pv = np.column_stack((np.full(len(faces), 3), faces)).ravel()
+			mesh = pv.PolyData(vertices, faces_pv)
+			plotter.add_mesh(mesh, color='lightgray', opacity=surface_alpha, 
+							smooth_shading=True)
+	
+	# Add mask as a surface if provided
+	if mask_data is not None:
+		binary_mask = (mask_data > 0).astype(np.int8)
+		try:
+			verts, faces, normals, values = marching_cubes(binary_mask, level=0.5)
+			mask_mesh = pv.PolyData(verts, np.column_stack(
+				(np.full(len(faces), 3), faces)).ravel())
+			plotter.add_mesh(mask_mesh, color=mask_color, opacity=mask_alpha, 
+							 smooth_shading=True)
+			
+		except Exception as e:
+			print(f"Error creating mask surface: {e}")
+			print("Falling back to simple mask outline...")
+			kernel = np.ones((3, 3, 3), dtype=np.int8)
+			kernel[1, 1, 1] = 0  
+			neighbor_count = convolve(binary_mask, kernel, mode='constant', cval=0)
+			boundary_mask = (binary_mask > 0) & (neighbor_count < 26)
+			bx, by, bz = np.where(boundary_mask)
+			points = np.column_stack((bx, by, bz))
+			if len(points) > 0:
+				boundary_point_cloud = pv.PolyData(points)
+				plotter.add_mesh(boundary_point_cloud, color=mask_color, 
+								point_size=5, render_points_as_spheres=True)
+	return(plotter)
 
 def interactive_surface_viewer(path_to_surface, positive_scalar_array, negative_scalar_array = None, scalar_mask = None, vmin = 0.95, vmax = 1.0, perform_surface_smoothing = True, n_smoothing_iterations = 100, background_color_rbga=[220, 210, 195, 255], positive_cmap='red-yellow', negative_cmap='blue-lightblue', plot_render = False):
 
