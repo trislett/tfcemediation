@@ -4087,3 +4087,71 @@ def interactive_surface_viewer(path_to_surface, positive_scalar_array, negative_
 	if plot_render:
 		plotter.show()
 		plotter.close()
+
+
+def generate_orthographic_snapshot_ply(path_to_ply, output_base, output_filetype='.svg'):
+	"""
+	Generates and saves orthogonal view plots of a 3D mesh from a PLY file.
+
+	Reads a PLY file containing a 3D mesh with RGB colors and saves six different
+	orthographic projections (axial superior, axial inferior, coronal posterior,
+	coronal anterior, sagittal right, sagittal left) as vector graphic files.
+
+	Parameters:
+		path_to_ply : str
+			Path to the input PLY file. (vtk is probably fine too as long as you have RGB data)
+		output_base : str
+			Base path for output files. If it ends with the
+			output_filetype extension, the extension is removed before appending
+			view-specific suffixes and the output_filetype.
+		output_filetype : str, optional
+			File format extension for saved images.
+			Must include the leading dot (e.g., '.svg', '.png'). Defaults to '.svg'.
+
+	Raises:
+		FileNotFoundError: If the input PLY file does not exist.
+		ValueError: If the mesh cannot be read or lacks RGB data.
+
+	Notes:
+		The output images are saved with suffixes indicating the view direction and 
+		anatomical orientation.
+	"""
+	if not output_filetype.startswith('.'):
+		output_filetype = '.' + output_filetype
+	if output_base.endswith(output_filetype):
+		output_base = output_base.split(output_filetype)[0]
+
+	mesh = pv.read(path_to_ply)
+
+	plotter = pv.Plotter(off_screen=True, window_size=(2000, 2000))
+	plotter.add_mesh(
+		mesh,
+		scalars='RGB',
+		rgb=True,
+		show_scalar_bar=False,
+	)
+
+	# Axial views (superior and inferior)
+	plotter.view_xy(negative=False, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_axial_superior" + output_filetype)
+	plotter.view_xy(negative=True, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_axial_inferior" + output_filetype)
+
+	# Coronal views (posterior and anterior)
+	plotter.view_xz(negative=False, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_coronal_posterior" + output_filetype)
+	plotter.view_xz(negative=True, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_coronal_anterior" + output_filetype)
+
+	# Sagittal views (right and left)
+	plotter.view_yz(negative=False, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_sagittal_right" + output_filetype)
+	plotter.view_yz(negative=True, render=False)
+	plotter.reset_camera()
+	plotter.save_graphic(output_base + "_sagittal_left" + output_filetype)
+	plotter.close()
