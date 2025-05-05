@@ -3050,6 +3050,133 @@ class LinearRegressionModelMRI:
 			outdata[data_mask==1] = values
 			nib.save(nib.Nifti1Image(outdata, affine), os.path.join(self.output_directory_, outname))
 
+	# display resutls
+	def display_voxel_stats(self, ImageObjectMRI, mode='t', contrast_index=-1, stat_type='1minusp', threshold=0.95, 
+						 vmax = 1.0, vmin = 0.0, clip = True, display_mask=True, surface_names=None, show_both_directions=True, plot_render=True, 
+						 generate_orthographic_snapshots=False, output_filetype='.svg'):
+		"""
+		Quickly visualize voxel statistical results.
+		
+		Parameters:
+		-----------
+		ImageObjectMRI : object
+			Object containing MRI data with mask information
+		mode : str
+			Type of analysis: 't' (t-statistic), 'mediation', 'nested' (default: 't')
+		contrast_index : int
+			Index of the contrast to display (for t-statistics only, default: -1)
+		stat_type : str
+			Type of statistic to display: 'raw' (raw statistic), 'tfce' (TFCE values), 
+			'1minusp' (1-p values) (default: '1minusp')
+		threshold : float
+			Initial threshold for displaying voxels (default: 0.95)
+		display_mask : bool
+			Whether to display the brain mask (default: True)
+		surface_names : list or None
+			Names of brain surface meshes to display (default: None)
+		show_both_directions : bool
+			Display both positive and negative results (default: True)
+		plot_render : bool
+			Whether to render the plot immediately (default: True)
+		generate_orthographic_snapshots : bool
+			Save orthographic views of the visualization (default: False)
+		output_filetype : str
+			File extension for saved images (default: '.svg')
+		
+		Returns:
+		--------
+		plotter : pyvista.Plotter or None
+			PyVista plotter object if plot_render is False, otherwise None
+		"""
+
+		base_dir = self.output_directory_
+		if mode == 't':
+			if hasattr(self, 't_contrast_names_') and self.t_.shape[0] == len(self.t_contrast_names_):
+				contrast_name = "tvalue-%s" % self.t_contrast_names_[int(contrast_index)]
+			else:
+				contrast_name = "tvalue-con%d" % np.arange(0, len(self.t_),1)[int(contrast_index)]
+		elif mode == 'mediation':
+			contrast_name = "mediation-zvalue"
+		elif mode == 'nested':
+			contrast_name = "nested-zvalue"
+		if stat_type == 'raw':
+			pos_path = os.path.join(base_dir, "%s.nii.gz" % contrast_name)
+			neg_path = pos_path
+		elif stat_type == 'tfce':
+			pos_path = os.path.join(base_dir, "%s-tfce_positive.nii.gz" % contrast_name)
+			neg_path = os.path.join(base_dir, "%s-tfce_negative.nii.gz" % contrast_name)
+		elif stat_type == '1minusp':
+			pos_path = os.path.join(base_dir, "%s-tfce_positive-1minusp.nii.gz" % contrast_name)
+			neg_path = os.path.join(base_dir, "%s-tfce_negative-1minusp.nii.gz" % contrast_name)
+
+		# Load positive data
+		if not os.path.exists(pos_path):
+			raise FileNotFoundError("Could not find positive result file: %s " % (pos_path))
+		if pos_path.endswith('.nii.gz'):
+			pos_data = nib.load(pos_path).get_fdata()
+			is_volume = True
+		# Load negative data if needed and exists
+		neg_data = None
+		if show_both_directions and neg_path is not None:
+			if os.path.exists(neg_path):
+				if neg_path == pos_path:
+					neg_data = -pos_data
+				else:
+					if neg_path.endswith('.nii.gz'):
+						neg_data = nib.load(neg_path).get_fdata()
+		if display_mask:
+			mask_data = ImageObjectMRI.mask_data_
+		else:
+			mask_data = None
+
+		plotter = mri_voxels_to_mesh(
+				voxel_data_positive=pos_data,
+				voxel_data_negative=neg_data,
+				threshold=0.95,
+				vmin=0, vmax=1.0,
+				clip=True,
+				voxel_alpha=0.7,
+				positive_cmap='red-yellow',
+				negative_cmap='blue-lightblue', 
+				surface_names=None,
+				surface_alpha=0.2,
+				mask_data=mask_data,
+				mask_color='white',
+				mask_alpha=0.2)
+
+	if generate_orthographic_snapshots:
+		# Axial views (superior and inferior)
+		plotter.view_xy(negative=False, render=False)
+		plotter.reset_camera()
+		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_axial_superior" + output_filetype))
+		plotter.view_xy(negative=True, render=False)
+		plotter.reset_camera()
+		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_axial_inferior" + output_filetype))
+
+		# Coronal views (posterior and anterior)
+		plotter.view_xz(negative=False, render=False)
+		plotter.reset_camera()
+		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_coronal_posterior" + output_filetype))
+		plotter.view_xz(negative=True, render=False)
+		plotter.reset_camera()
+		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_coronal_anterior" + output_filetype))
+
+		# Sagittal views (right and left)
+		plotter.view_yz(negative=False, render=False)
+		plotter.reset_camera()
+		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_sagittal_right" + output_filetype))
+		plotter.view_yz(negative=True, render=False)
+		plotter.reset_camera()
+		plotter.save_graphic(os.path.join(base_dir, output_base + "_sagittal_left" + output_filetype))
+		
+	if plot_render:
+		plotter.show()
+		plotter.close()
+	else:
+		return(plotter)
+
+
+
 	# Serialization
 	def save(self, filename):
 		"""
@@ -3758,22 +3885,35 @@ def write_cortical_surface_results_to_ply(positive_scalar_array, ImageObjectMRI,
 	outdata[ImageObjectMRI.mask_data_[1] == 1] = color_arr[np.sum(ImageObjectMRI.mask_data_[0] == 1):]
 	save_ply(v_rh, f_rh, outname[:-4] + ".rh.ply", color_array=outdata, output_binary=True)
 
-def mri_voxels_to_mesh(voxel_data, threshold=0.95, vmin=-1.0, vmax=1.0, clip = True, voxel_alpha=0.7, cmap_name='red-yellow', 
-						surface_names=None, surface_alpha=0.2, mask_data = None, 
+
+def mri_voxels_to_mesh(voxel_data_positive, voxel_data_negative=None, threshold=0.95, 
+						vmin=0, vmax=1.0, clip=True, voxel_alpha=0.7, 
+						positive_cmap='red-yellow', negative_cmap='blue-lightblue', 
+						surface_names=None, surface_alpha=0.2, mask_data=None, 
 						mask_color='white', mask_alpha=0.2):
 	"""
 	Convert voxel-wise MRI statistics to a 3D mesh representation with brain surfaces and mask surface.
 	
 	Parameters:
 	-----------
-	voxel_data : numpy.ndarray
-		3D array containing the voxel values
+	voxel_data_positive : numpy.ndarray
+		3D array containing the positive voxel values
+	voxel_data_negative : numpy.ndarray, optional
+		3D array containing the negative voxel values (default: None)
 	threshold : float
 		Minimum value for a voxel to be displayed (default: 0.95)
+	vmin : float
+		Minimum value for color scaling (default: 0)
+	vmax : float
+		Maximum value for color scaling (default: 1.0)
+	clip : bool
+		Whether to clip values between vmin and vmax (default: True)
 	voxel_alpha : float
 		Transparency level for voxels between 0 and 1 (default: 0.7)
-	cmap_name : str
-		Name of the colormap to use (default: 'red-yellow')
+	positive_cmap : str
+		Name of the colormap to use for positive values (default: 'red-yellow')
+	negative_cmap : str
+		Name of the colormap to use for negative values (default: 'blue-lightblue')
 	surface_names : list
 		List of surface names to load and display
 	surface_alpha : float
@@ -3791,26 +3931,45 @@ def mri_voxels_to_mesh(voxel_data, threshold=0.95, vmin=-1.0, vmax=1.0, clip = T
 		PyVista plotter object with the mesh visualization
 	"""
 
-	cmap_positive = ListedColormap(get_cmap_array(cmap_name)/255)
-	
-	# Create a PyVista plotter
+	cmap_positive = ListedColormap(get_cmap_array(positive_cmap)/255)
+	cmap_negative = ListedColormap(get_cmap_array(negative_cmap)/255)
+
 	plotter = pv.Plotter()
 	
-	x_indices, y_indices, z_indices = np.where(voxel_data > threshold)
-	#clip the top and bottom values for normalization
+	# Process positive voxel data
+	x_indices, y_indices, z_indices = np.where(voxel_data_positive > threshold)
+	# Clip the values if needed
 	if clip:
-		values = np.clip(voxel_data[x_indices, y_indices, z_indices], vmin, vmax)
+		values = np.clip(voxel_data_positive[x_indices, y_indices, z_indices], threshold, vmax)
 	else:
-		values = voxel_data[x_indices, y_indices, z_indices]
-	# Normalize values for coloring
+		values = voxel_data_positive[x_indices, y_indices, z_indices]
+	
+	# Normalize values from threshold to vmax
 	if len(values) > 0:
-		norm_values = (values - np.min(values)) / (np.max(values) - np.min(values))
+		norm_values = (values - threshold) / (vmax - threshold)
 		for i in range(len(x_indices)):
 			x, y, z = x_indices[i], y_indices[i], z_indices[i]
 			val = norm_values[i]
 			cube = pv.Cube(center=(x, y, z), x_length=1, y_length=1, z_length=1)
 			color = cmap_positive(val)
 			plotter.add_mesh(cube, color=color[:3], opacity=voxel_alpha)
+	
+	# Process negative voxel data if provided
+	if voxel_data_negative is not None:
+		x_neg_indices, y_neg_indices, z_neg_indices = np.where(voxel_data_negative > threshold)
+		if clip:
+			neg_values = np.clip(voxel_data_negative[x_neg_indices, y_neg_indices, z_neg_indices], threshold, vmax)
+		else:
+			neg_values = voxel_data_negative[x_neg_indices, y_neg_indices, z_neg_indices]
+		
+		if len(neg_values) > 0:
+			norm_neg_values = (neg_values - threshold) / (vmax - threshold)
+			for i in range(len(x_neg_indices)):
+				x, y, z = x_neg_indices[i], y_neg_indices[i], z_neg_indices[i]
+				val = norm_neg_values[i]
+				cube = pv.Cube(center=(x, y, z), x_length=1, y_length=1, z_length=1)
+				color = cmap_negative(val)
+				plotter.add_mesh(cube, color=color[:3], opacity=voxel_alpha)
 	
 	# Add brain surfaces if provided
 	if surface_names:
@@ -3845,6 +4004,8 @@ def mri_voxels_to_mesh(voxel_data, threshold=0.95, vmin=-1.0, vmax=1.0, clip = T
 				plotter.add_mesh(boundary_point_cloud, color=mask_color, 
 								point_size=5, render_points_as_spheres=True)
 	return(plotter)
+
+
 
 def interactive_surface_viewer(path_to_surface, positive_scalar_array, negative_scalar_array = None, scalar_mask = None, vmin = 0.95, vmax = 1.0, perform_surface_smoothing = True, n_smoothing_iterations = 100, background_color_rbga=[220, 210, 195, 255], positive_cmap='red-yellow', negative_cmap='blue-lightblue', plot_render = False):
 
@@ -3926,71 +4087,3 @@ def interactive_surface_viewer(path_to_surface, positive_scalar_array, negative_
 	if plot_render:
 		plotter.show()
 		plotter.close()
-
-def generate_orthographic_snapshot_ply(path_to_ply, output_base, output_filetype='.svg'):
-	"""
-	Generates and saves orthogonal view plots of a 3D mesh from a PLY file.
-
-	Reads a PLY file containing a 3D mesh with RGB colors and saves six different
-	orthographic projections (axial superior, axial inferior, coronal posterior,
-	coronal anterior, sagittal right, sagittal left) as vector graphic files.
-
-	Parameters:
-		path_to_ply : str
-			Path to the input PLY file. (vtk is probably fine too as long as you have RGB data)
-		output_base : str
-			Base path for output files. If it ends with the
-			output_filetype extension, the extension is removed before appending
-			view-specific suffixes and the output_filetype.
-		output_filetype : str, optional
-			File format extension for saved images.
-			Must include the leading dot (e.g., '.svg', '.png'). Defaults to '.svg'.
-
-	Raises:
-		FileNotFoundError: If the input PLY file does not exist.
-		ValueError: If the mesh cannot be read or lacks RGB data.
-
-	Notes:
-		The output images are saved with suffixes indicating the view direction and 
-		anatomical orientation.
-	"""
-	if not output_filetype.startswith('.'):
-		output_filetype = '.' + output_filetype
-	if output_base.endswith(output_filetype):
-		output_base = output_base.split(output_filetype)[0]
-
-	mesh = pv.read(path_to_ply)
-
-	plotter = pv.Plotter(off_screen=True, window_size=(2000, 2000))
-	plotter.add_mesh(
-		mesh,
-		scalars='RGB',
-		rgb=True,
-		show_scalar_bar=False,
-	)
-
-	# Axial views (superior and inferior)
-	plotter.view_xy(negative=False, render=False)
-	plotter.reset_camera()
-	plotter.save_graphic(output_base + "_axial_superior" + output_filetype)
-	plotter.view_xy(negative=True, render=False)
-	plotter.reset_camera()
-	plotter.save_graphic(output_base + "_axial_inferior" + output_filetype)
-
-	# Coronal views (posterior and anterior)
-	plotter.view_xz(negative=False, render=False)
-	plotter.reset_camera()
-	plotter.save_graphic(output_base + "_coronal_posterior" + output_filetype)
-	plotter.view_xz(negative=True, render=False)
-	plotter.reset_camera()
-	plotter.save_graphic(output_base + "_coronal_anterior" + output_filetype)
-
-	# Sagittal views (right and left)
-	plotter.view_yz(negative=False, render=False)
-	plotter.reset_camera()
-	plotter.save_graphic(output_base + "_sagittal_right" + output_filetype)
-	plotter.view_yz(negative=True, render=False)
-	plotter.reset_camera()
-	plotter.save_graphic(output_base + "_sagittal_left" + output_filetype)
-	plotter.close()
-
