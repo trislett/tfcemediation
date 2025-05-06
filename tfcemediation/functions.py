@@ -3114,7 +3114,6 @@ class LinearRegressionModelMRI:
 			raise FileNotFoundError("Could not find positive result file: %s " % (pos_path))
 		if pos_path.endswith('.nii.gz'):
 			pos_data = nib.load(pos_path).get_fdata()
-			is_volume = True
 		# Load negative data if needed and exists
 		neg_data = None
 		if show_both_directions and neg_path is not None:
@@ -3144,36 +3143,35 @@ class LinearRegressionModelMRI:
 				mask_color='white',
 				mask_alpha=0.2)
 
-	if generate_orthographic_snapshots:
-		# Axial views (superior and inferior)
-		plotter.view_xy(negative=False, render=False)
-		plotter.reset_camera()
-		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_axial_superior" + output_filetype))
-		plotter.view_xy(negative=True, render=False)
-		plotter.reset_camera()
-		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_axial_inferior" + output_filetype))
+		if generate_orthographic_snapshots:
+			# Axial views (superior and inferior)
+			plotter.view_xy(negative=False, render=False)
+			plotter.reset_camera()
+			plotter.save_graphic(os.path.join(base_dir, contrast_name + "_axial_superior" + output_filetype))
+			plotter.view_xy(negative=True, render=False)
+			plotter.reset_camera()
+			plotter.save_graphic(os.path.join(base_dir, contrast_name + "_axial_inferior" + output_filetype))
 
-		# Coronal views (posterior and anterior)
-		plotter.view_xz(negative=False, render=False)
-		plotter.reset_camera()
-		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_coronal_posterior" + output_filetype))
-		plotter.view_xz(negative=True, render=False)
-		plotter.reset_camera()
-		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_coronal_anterior" + output_filetype))
+			# Coronal views (posterior and anterior)
+			plotter.view_xz(negative=False, render=False)
+			plotter.reset_camera()
+			plotter.save_graphic(os.path.join(base_dir, contrast_name + "_coronal_posterior" + output_filetype))
+			plotter.view_xz(negative=True, render=False)
+			plotter.reset_camera()
+			plotter.save_graphic(os.path.join(base_dir, contrast_name + "_coronal_anterior" + output_filetype))
 
-		# Sagittal views (right and left)
-		plotter.view_yz(negative=False, render=False)
-		plotter.reset_camera()
-		plotter.save_graphic(os.path.join(base_dir, contrast_name + "_sagittal_right" + output_filetype))
-		plotter.view_yz(negative=True, render=False)
-		plotter.reset_camera()
-		plotter.save_graphic(os.path.join(base_dir, output_base + "_sagittal_left" + output_filetype))
-		
-	if plot_render:
-		plotter.show()
-		plotter.close()
-	else:
-		return(plotter)
+			# Sagittal views (right and left)
+			plotter.view_yz(negative=False, render=False)
+			plotter.reset_camera()
+			plotter.save_graphic(os.path.join(base_dir, contrast_name + "_sagittal_right" + output_filetype))
+			plotter.view_yz(negative=True, render=False)
+			plotter.reset_camera()
+			plotter.save_graphic(os.path.join(base_dir, contrast_name + "_sagittal_left" + output_filetype))
+		if plot_render:
+			plotter.show()
+			plotter.close()
+		else:
+			return(plotter)
 
 
 
