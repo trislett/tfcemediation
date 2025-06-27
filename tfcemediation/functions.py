@@ -1041,7 +1041,7 @@ class VoxelImage:
 			self.n_images_ = len(image_path)
 			self.image_data_ = np.zeros((self.n_voxels_, self.n_images_)).astype(np.float32, order = "C")
 			for s, path in enumerate(image_path):
-				img_temp = nib.load(image_path)
+				img_temp = nib.load(path)
 				assert np.all(self.affine_ == img_temp.affine), "The affines of the mask and image [%s] must be equal" % os.path.basename(path)
 				self.image_data_[:,s] = img_temp.get_fdata()[self.mask_data_==1]
 		else:
@@ -3131,8 +3131,8 @@ class LinearRegressionModelMRI:
 		plotter = mri_voxels_to_mesh(
 				voxel_data_positive=pos_data,
 				voxel_data_negative=neg_data,
-				threshold=0.95,
-				vmin=0, vmax=1.0,
+				threshold=threshold,
+				vmin=vmin, vmax=vmax,
 				clip=True,
 				voxel_alpha=0.7,
 				positive_cmap='red-yellow',
