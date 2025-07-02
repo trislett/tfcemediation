@@ -3103,11 +3103,19 @@ class LinearRegressionModelMRI:
 			pos_path = os.path.join(base_dir, "%s.nii.gz" % contrast_name)
 			neg_path = pos_path
 		elif stat_type == 'tfce':
-			pos_path = os.path.join(base_dir, "%s-tfce_positive.nii.gz" % contrast_name)
-			neg_path = os.path.join(base_dir, "%s-tfce_negative.nii.gz" % contrast_name)
+			if mode == 'nested':
+				pos_path = os.path.join(base_dir, "%s-tfce.nii.gz" % contrast_name)
+				neg_path = None
+			else:
+				pos_path = os.path.join(base_dir, "%s-tfce_positive.nii.gz" % contrast_name)
+				neg_path = os.path.join(base_dir, "%s-tfce_negative.nii.gz" % contrast_name)
 		elif stat_type == '1minusp':
-			pos_path = os.path.join(base_dir, "%s-tfce_positive-1minusp.nii.gz" % contrast_name)
-			neg_path = os.path.join(base_dir, "%s-tfce_negative-1minusp.nii.gz" % contrast_name)
+			if mode == 'nested':
+				pos_path = os.path.join(base_dir, "%s-tfce-1minusp.nii.gz" % contrast_name)
+				neg_path = None
+			else:
+				pos_path = os.path.join(base_dir, "%s-tfce_positive-1minusp.nii.gz" % contrast_name)
+				neg_path = os.path.join(base_dir, "%s-tfce_negative-1minusp.nii.gz" % contrast_name)
 
 		# Load positive data
 		if not os.path.exists(pos_path):

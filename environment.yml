@@ -15,7 +15,7 @@ dependencies:
   - rpy2
   - tqdm
   - matplotlib
-  - scipy
+  - scipy<=1.15.3
   - nibabel
   - cython
   - scikit-learn
