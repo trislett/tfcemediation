@@ -1,21 +1,7 @@
 import os
-import sys
-
-from setuptools import setup, find_packages, Extension
-from Cython.Build import cythonize
 import numpy
-
-PACKAGE_NAME = "tfcemediation"
-
-BUILD_REQUIRES = ["numpy", "scipy", "matplotlib", "nibabel", "cython", "scikit-learn", "scikit-image", "joblib", "pandas", "tqdm", "statsmodels"]
-
-CLASSIFIERS = ["Development Status :: 4 - Beta",
-  "Environment :: Console",
-  "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
-  "Operating System :: OS Independent",
-  "Programming Language :: Python",
-  "Topic :: Scientific/Engineering :: Medical Science Apps."]
+from setuptools import setup, Extension
+from Cython.Build import cythonize
 
 extensions = [
     Extension(
@@ -51,23 +37,8 @@ extensions = [
 ]
 
 if os.path.exists('MANIFEST'):
-  os.remove('MANIFEST')
+    os.remove('MANIFEST')
 
-exec(open('tfcemediation/version.py').read())
-setup(name = PACKAGE_NAME, version = __version__, include_package_data=True,
-  maintainer = "Tristram Lett",
-  maintainer_email = "tris.lett@gmail.com",
-  description = "tfcemediation",
-  long_description = "Fast regression and mediation analysis of vertex or voxel MRI data with TFCE",
-  url = "https://github.com/trislett/tfce_mediation_slim",
-  download_url = "",
-  platforms=["Linux", "Solaris", "Mac OS-X", "Unix"],
-  license = "GNU General Public License v3 or later (GPLv3+)",
-  zip_safe=False,
-  install_requires=BUILD_REQUIRES,
-  packages=find_packages(),
-  package_dir={'tfcemediation': 'tfcemediation'},
-  package_data={'tfcemediation': ['static/*', 'libs/*', 'static/aseg-subcortical-Surf/*', 'static/JHU-ICBM-Surf/*', 'static/aseg-other-Surf/']},
-  ext_modules=cythonize(extensions, language_level="3"),
-  python_requires=">=3.7",
+setup(
+    ext_modules=cythonize(extensions, language_level="3")
 )
