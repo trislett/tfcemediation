@@ -3800,16 +3800,18 @@ def _vertex_paint(positive_scalar, negative_scalar=None, vmin=0.95, vmax=1.0, ba
 	out_color_arr = np.ones((len(positive_scalar), 4), int) * 255
 	out_color_arr[:] = background_color_rbga
 	norm = Normalize(vmin, vmax)
-	if np.sum(positive_scalar > vmin) != 0:
-		cmap = ListedColormap(np.divide(pos_cmap_arr, 255))
-		mask = positive_scalar > vmin
-		vals = np.round(cmap(norm(positive_scalar[mask])) * 255).astype(int)
-		out_color_arr[mask] = vals
-	if np.sum(negative_scalar > vmin) != 0:
-		cmap = ListedColormap(np.divide(neg_cmap_arr, 255))
-		mask = negative_scalar > vmin
-		vals = np.round(cmap(norm(negative_scalar[mask])) * 255).astype(int)
-		out_color_arr[mask] = vals
+	if positive_scalar is not None:
+		if np.sum(positive_scalar > vmin) != 0:
+			cmap = ListedColormap(np.divide(pos_cmap_arr, 255))
+			mask = positive_scalar > vmin
+			vals = np.round(cmap(norm(positive_scalar[mask])) * 255).astype(int)
+			out_color_arr[mask] = vals
+	if negative_scalar is not None:
+		if np.sum(negative_scalar > vmin) != 0:
+			cmap = ListedColormap(np.divide(neg_cmap_arr, 255))
+			mask = negative_scalar > vmin
+			vals = np.round(cmap(norm(negative_scalar[mask])) * 255).astype(int)
+			out_color_arr[mask] = vals
 	return(out_color_arr)
 
 
