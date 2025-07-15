@@ -76,7 +76,6 @@ def configure_threads(n_threads=1):
 	os.environ["VECLIB_MAXIMUM_THREADS"] = str(n_threads)
 
 
-
 def generate_seeds(n_seeds, maxint = int(2**32 - 1)):
 	"""
 	Generates a list of random integer seeds.
@@ -1633,7 +1632,7 @@ class LinearRegressionModelMRI:
 		self.mediation_endogB_ = endogB
 		return(self)
 
-	def calculate_nested_model_from_formula(self, reduced_formula, calculate_effect_size = False, calculate_probability = True, calculate_log_ratio_test = False, calculate_aic = False, calculate_bic = False, estimate_z_statistic = True):
+	def calculate_nested_model_from_formula(self, reduced_formula, calculate_effect_size = False, calculate_probability = True, calculate_log_ratio_test = True, calculate_aic = False, calculate_bic = False, estimate_z_statistic = True):
 		"""Compare a full model to a nested reduced model using F-test and optionally LRT.
 		
 		This function evaluates the difference between a full model (based on 'self.X_') and a reduced model 
@@ -1658,7 +1657,7 @@ class LinearRegressionModelMRI:
 			If True, computes the Likelihood Ratio Test statistic (Chi-squared),
 			associated p-value (if 'calculate_probability' is True), and the
 			log-likelihood for both models. Required if 'calculate_aic' or 'calculate_bic'
-			is True. Default is False.
+			is True. Default is True.
 		calculate_aic : bool, optional
 			If True (and 'calculate_log_ratio_test' is True), calculates the
 			difference in Akaike Information Criterion (AIC) between the full
@@ -1693,7 +1692,7 @@ class LinearRegressionModelMRI:
 			effect size. Shape (n_targets,). Only set if
 			'calculate_effect_size=True'.
 		nested_model_z_ : numpy.ndarray, optional
-			The z-statistic derived from the F-statistic via Wilson-Hilferty
+			The z-statistic derived from the log-likelihood chi2 or F-statistic via Wilson-Hilferty
 			approximation. Shape (n_targets,). Only set if
 			'estimate_z_statistic=True'.
 		nested_model_f_pvalues_ : numpy.ndarray, optional
@@ -1795,7 +1794,11 @@ class LinearRegressionModelMRI:
 			self.nested_model_bic_difference_ = (self._calculate_bic(llf = self.log_likelihood_, N = num_observations, k = int(self.X_.shape[1]+1)) -
 										self._calculate_bic(llf = self.log_likelihood_reduced_, N = num_observations, k = int(Xreduced.shape[1]+1)))
 		if estimate_z_statistic:
-			self.nested_model_z_ = self.f_to_z_wilson_hilfert(self.nested_model_f_, df_num)
+			if calculate_log_ratio_test:
+				self.use_log_likelihood_z_ = True
+				self.nested_model_z_ = self.chi2_to_z_wilson_hilferty(self.nested_model_log_ratio_chi2_, df_num)
+			else:
+				self.nested_model_z_ = self.f_to_z_wilson_hilfert(self.nested_model_f_, df_num)
 		self.nested_model_Xreduced_ = Xreduced
 		self.nested_model_df_num_ = df_num
 		self.nested_model_df_den_ = df_den
@@ -2127,18 +2130,32 @@ class LinearRegressionModelMRI:
 							stratification_arr=stratification_blocks,
 							seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
 				elif mode == 'nested':
-					chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
-						delayed(self._run_nested_z_tfce_permutation)(
-							i=i,
-							X=X,
-							Xreduced=Xreduced,
-							y=y,
-							H=self.tfce_H_,
-							E=self.tfce_E_,
-							adjacency_set=self.adjacency_set_,
-							mask_data=self.mask_data_,
-							stratification_arr=stratification_blocks,
-							seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+					if self.use_log_likelihood_z_: # temporary until the functions are combined
+						chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+							delayed(self._run_nested_z_tfce_permutation_likelihood)(
+								i=i,
+								X=X,
+								Xreduced=Xreduced,
+								y=y,
+								H=self.tfce_H_,
+								E=self.tfce_E_,
+								adjacency_set=self.adjacency_set_,
+								mask_data=self.mask_data_,
+								stratification_arr=stratification_blocks,
+								seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+					else:
+						chunk_tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+							delayed(self._run_nested_z_tfce_permutation)(
+								i=i,
+								X=X,
+								Xreduced=Xreduced,
+								y=y,
+								H=self.tfce_H_,
+								E=self.tfce_E_,
+								adjacency_set=self.adjacency_set_,
+								mask_data=self.mask_data_,
+								stratification_arr=stratification_blocks,
+								seed=seeds[i]) for i in tqdm(range(int(chunk_size/seeds_divisor))))
 					
 				tfce_maximum_values.append(chunk_tfce_maximum_values)
 			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
@@ -2173,18 +2190,32 @@ class LinearRegressionModelMRI:
 						stratification_arr=stratification_blocks,
 						seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
 			elif mode == 'nested':
-				tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
-					delayed(self._run_nested_z_tfce_permutation)(
-						i=i,
-						X=X,
-						Xreduced=Xreduced,
-						y=y,
-						H=self.tfce_H_,
-						E=self.tfce_E_,
-						adjacency_set=self.adjacency_set_,
-						mask_data=self.mask_data_,
-						stratification_arr=stratification_blocks,
-						seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+				if self.use_log_likelihood_z_: # temporary until the functions are combined
+					tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_nested_z_tfce_permutation_likelihood)(
+							i=i,
+							X=X,
+							Xreduced=Xreduced,
+							y=y,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+				else:
+					tfce_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_nested_z_tfce_permutation)(
+							i=i,
+							X=X,
+							Xreduced=Xreduced,
+							y=y,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i]) for i in tqdm(range(int(n_permutations/seeds_divisor))))
 			tfce_maximum_values = np.array(tfce_maximum_values).ravel()
 		if mode == 't':
 			self.t_tfce_max_permutations_ = np.array(tfce_maximum_values)
@@ -2443,6 +2474,112 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(max_pos, max_neg)
 
+	def _run_nested_z_tfce_permutation_likelihood(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed):
+		"""
+		Runs a single TFCE-based permutation test on estimated z statistic from a log likelihood test from nested_model.
+		
+		This function shuffles the data, computes z-statistic, and applies the TFCE algorithm.
+		
+		Parameters
+		----------
+		i : int
+		    The permutation index.
+		X : numpy.ndarray
+		    The design matrix for the regression model.
+		Xreduced : numpy.ndarray
+		    The reduced design matrix for the regression model.
+		y : numpy.ndarray
+		    The response variable.
+		H : float
+		    The height exponent for TFCE computation.
+		E : float
+		    The extent exponent for TFCE computation.
+		adjacency_set : list
+		    A set defining adjacency relationships between data points.
+		stratification_arr : list
+		    A list defining stratification blocks for permutation testing
+		seed : int or None
+		    The random seed for permutation.
+		
+		Returns
+		-------
+		tuple
+		    The maximum TFCE values.
+		"""
+		if seed is None:
+		    np.random.seed(np.random.randint(4294967295))
+		else:
+		    np.random.seed(seed)
+
+		assert X.shape[1] > Xreduced.shape[1], "Xreduced must have a lower rank that the full model X"
+		assert X.shape[0] == Xreduced.shape[0], "Xreduced must have the same number of subjects as the full model X"
+
+		if stratification_arr is not None:
+		    perm_idx = self._permute_stratified_blocks(stratification_arr, seed=seed)
+		else:
+		    perm_idx = np.random.permutation(np.arange(X.shape[0]))
+		tmp_X = X[perm_idx]
+		tmp_Xreduced = Xreduced[perm_idx]
+
+		# Calculate coefficients and predictions (removed duplication)
+		tmp_coef = cy_lin_lstsqr_mat(tmp_X, y)
+		tmp_coef_reduced = cy_lin_lstsqr_mat(tmp_Xreduced, y)
+		tmp_y_pred_full = np.dot(tmp_X, tmp_coef)
+		tmp_y_pred_reduced = np.dot(tmp_Xreduced, tmp_coef_reduced)
+		tmp_rss_full = np.sum((y - tmp_y_pred_full) ** 2, 0)
+		tmp_rss_reduced = np.sum((y - tmp_y_pred_reduced) ** 2, 0)
+		tmp_df1 = tmp_X.shape[1] - tmp_Xreduced.shape[1]
+
+		# Calculate likelihood ratio test
+		tmp_num_observations = tmp_X.shape[0]
+		tmp_log_likelihood_ = self._calculate_log_likelihood(N=tmp_num_observations, rss=tmp_rss_full)
+		tmp_log_likelihood_reduced_ = self._calculate_log_likelihood(N=tmp_num_observations, rss=tmp_rss_reduced)
+		tmp_chi2_ = -2*(tmp_log_likelihood_reduced_ - tmp_log_likelihood_)
+		tmp_chi2_ = np.maximum(0, tmp_chi2_)
+		
+		# Convert to z-statistic
+		stat = self.chi2_to_z_wilson_hilferty(tmp_chi2_, tmp_df1).astype(np.float32, order="C")
+
+		# Unlink variable from memory
+		tmp_X = None
+		tmp_Xreduced = None
+		tmp_coef = None
+		tmp_coef_reduced = None
+		tmp_y_pred_full = None
+		tmp_y_pred_reduced = None
+		tmp_rss_full = None
+		tmp_rss_reduced = None
+		tmp_df1 = None
+		tmp_num_observations = None
+		tmp_log_likelihood_ = None
+		tmp_log_likelihood_reduced_ = None
+		tmp_chi2_ = None
+		del tmp_X, tmp_Xreduced, tmp_coef, tmp_coef_reduced, tmp_y_pred_full, tmp_y_pred_reduced, tmp_rss_full, tmp_rss_reduced, tmp_df1, tmp_num_observations, tmp_log_likelihood_, tmp_log_likelihood_reduced_, tmp_chi2_
+
+		if len(adjacency_set) == 2:
+		    max_pos = self._calculate_surface_tfce(mask_data=mask_data,
+		                                         statistic=stat,
+		                                         adjacency_set=adjacency_set,
+		                                         H=H, E=E, return_max_tfce=True,
+		                                         only_positive_contrast=True)
+		else:
+		    perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+		    stat_TFCE = np.zeros_like(stat).astype(np.float32, order="C")
+		    perm_calcTFCE.run(stat, stat_TFCE)
+		    max_pos = stat_TFCE.max()
+		    perm_calcTFCE = None
+		    stat_TFCE = None
+		X = None
+		Xreduced = None
+		y = None
+		stat = None
+		adjacency_set = None
+		mask_data = None
+		del adjacency_set, stat, mask_data, X, Xreduced, y
+		gc.collect()
+		return(max_pos)
+
+
 	def _run_nested_z_tfce_permutation(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed):
 		"""
 		Runs a single TFCE-based permutation test on estimated z statistic from nested_model.
@@ -2636,6 +2773,23 @@ class LinearRegressionModelMRI:
 			# Ensure negative F-stats result in Z-stat = 0
 			z_approx[f_stats < 0] = 0
 		return(z_approx)
+
+	def chi2_to_z_wilson_hilferty(chi2_values, df):
+		"""Wilson-Hilferty for chi-squared statistics"""
+		chi2_values = np.asarray(chi2_values)
+		df = np.asarray(df)
+		
+		nine_df = 9.0 * df
+		h = 2.0 / nine_df
+		one_minus_h = 1.0 - h
+		sqrt_h = np.sqrt(h)
+		
+		# Key difference: normalize by df before cube root
+		normalized_chi2 = chi2_values / df
+		cube_root_term = np.power(normalized_chi2, 1.0/3.0)
+		z = (cube_root_term - one_minus_h) / sqrt_h
+		
+		return z
 
 	def _calculate_permuted_pvalue(self, permuted_distribution_arr, statistic_arr):
 		"""
