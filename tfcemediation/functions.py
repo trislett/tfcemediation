@@ -2774,7 +2774,7 @@ class LinearRegressionModelMRI:
 			z_approx[f_stats < 0] = 0
 		return(z_approx)
 
-	def chi2_to_z_wilson_hilferty(chi2_values, df):
+	def chi2_to_z_wilson_hilferty(self, chi2_values, df):
 		"""Wilson-Hilferty for chi-squared statistics"""
 		chi2_values = np.asarray(chi2_values)
 		df = np.asarray(df)
@@ -2784,12 +2784,10 @@ class LinearRegressionModelMRI:
 		one_minus_h = 1.0 - h
 		sqrt_h = np.sqrt(h)
 		
-		# Key difference: normalize by df before cube root
 		normalized_chi2 = chi2_values / df
 		cube_root_term = np.power(normalized_chi2, 1.0/3.0)
 		z = (cube_root_term - one_minus_h) / sqrt_h
-		
-		return z
+		return(z)
 
 	def _calculate_permuted_pvalue(self, permuted_distribution_arr, statistic_arr):
 		"""
