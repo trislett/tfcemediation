@@ -2261,7 +2261,6 @@ class LinearRegressionModelMRI:
 			useful when controlling for confounding variables or when dealing with clustered or 
 			hierarchical data.
 		"""
-		assert hasattr(self, 'adjacency_set_'), "Run calculate_tfce first (required for adjacency structure)"
 		
 		# Mode-specific preparations
 		if mode == 't':
@@ -2275,9 +2274,8 @@ class LinearRegressionModelMRI:
 				y = y - self.predict(self.X_)
 			X = self.X_
 		elif mode == 'mediation':
-			assert hasattr(self, 'mediation_z_tfce_positive_'), "Run calculate_mediation_z_tfce first"
+			assert hasattr(self, 'mediation_z_'), "Run calculate_mediation_z_tfce first"
 		elif mode == 'nested':
-			assert hasattr(self, 'adjacency_set_'), "Run calculate_nested_model_z_tfce first"
 			if self.memory_mapping_:
 				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
 				y = jload(self.memmap_y_name_, mmap_mode='r')
@@ -2314,10 +2312,10 @@ class LinearRegressionModelMRI:
 							X=X,
 							y=y, 
 							contrast_index=contrast_index,
-							H=self.tfce_H_,
-							E=self.tfce_E_,
-							adjacency_set=self.adjacency_set_,
-							mask_data=self.mask_data_,
+							H=None,
+							E=None,
+							adjacency_set=None,
+							mask_data=None,
 							stratification_arr=stratification_blocks,
 							seed=seeds[i],
 							perform_tfce=False) for i in tqdm(range(int(chunk_size/seeds_divisor))))
@@ -2329,10 +2327,10 @@ class LinearRegressionModelMRI:
 							endogA=self.mediation_endogA_,
 							exogB=self.mediation_exogB_,
 							endogB=self.mediation_endogB_,
-							H=self.tfce_H_,
-							E=self.tfce_E_,
-							adjacency_set=self.adjacency_set_,
-							mask_data=self.mask_data_,
+							H=None,
+							E=None,
+							adjacency_set=None,
+							mask_data=None,
 							stratification_arr=stratification_blocks,
 							seed=seeds[i],
 							perform_tfce=False) for i in tqdm(range(int(chunk_size/seeds_divisor))))
@@ -2344,10 +2342,10 @@ class LinearRegressionModelMRI:
 								X=X,
 								Xreduced=Xreduced,
 								y=y,
-								H=self.tfce_H_,
-								E=self.tfce_E_,
-								adjacency_set=self.adjacency_set_,
-								mask_data=self.mask_data_,
+								H=None,
+								E=None,
+								adjacency_set=None,
+								mask_data=None,
 								stratification_arr=stratification_blocks,
 								seed=seeds[i],
 								perform_tfce=False) for i in tqdm(range(int(chunk_size/seeds_divisor))))
@@ -2358,10 +2356,10 @@ class LinearRegressionModelMRI:
 								X=X,
 								Xreduced=Xreduced,
 								y=y,
-								H=self.tfce_H_,
-								E=self.tfce_E_,
-								adjacency_set=self.adjacency_set_,
-								mask_data=self.mask_data_,
+								H=None,
+								E=None,
+								adjacency_set=None,
+								mask_data=None,
 								stratification_arr=stratification_blocks,
 								seed=seeds[i],
 								perform_tfce=False) for i in tqdm(range(int(chunk_size/seeds_divisor))))
@@ -2378,10 +2376,10 @@ class LinearRegressionModelMRI:
 						X=X,
 						y=y, 
 						contrast_index=contrast_index,
-						H=self.tfce_H_,
-						E=self.tfce_E_,
-						adjacency_set=self.adjacency_set_,
-						mask_data=self.mask_data_,
+						H=None,
+						E=None,
+						adjacency_set=None,
+						mask_data=None,
 						stratification_arr=stratification_blocks,
 						seed=seeds[i],
 						perform_tfce=False) for i in tqdm(range(int(n_permutations/seeds_divisor))))
@@ -2393,10 +2391,10 @@ class LinearRegressionModelMRI:
 						endogA=self.mediation_endogA_,
 						exogB=self.mediation_exogB_,
 						endogB=self.mediation_endogB_,
-						H=self.tfce_H_,
-						E=self.tfce_E_,
-						adjacency_set=self.adjacency_set_,
-						mask_data=self.mask_data_,
+						H=None,
+						E=None,
+						adjacency_set=None,
+						mask_data=None,
 						stratification_arr=stratification_blocks,
 						seed=seeds[i],
 						perform_tfce=False) for i in tqdm(range(int(n_permutations/seeds_divisor))))
@@ -2408,10 +2406,10 @@ class LinearRegressionModelMRI:
 							X=X,
 							Xreduced=Xreduced,
 							y=y,
-							H=self.tfce_H_,
-							E=self.tfce_E_,
-							adjacency_set=self.adjacency_set_,
-							mask_data=self.mask_data_,
+							H=None,
+							E=None,
+							adjacency_set=None,
+							mask_data=None,
 							stratification_arr=stratification_blocks,
 							seed=seeds[i],
 							perform_tfce=False) for i in tqdm(range(int(n_permutations/seeds_divisor))))
@@ -2422,10 +2420,10 @@ class LinearRegressionModelMRI:
 							X=X,
 							Xreduced=Xreduced,
 							y=y,
-							H=self.tfce_H_,
-							E=self.tfce_E_,
-							adjacency_set=self.adjacency_set_,
-							mask_data=self.mask_data_,
+							H=None,
+							E=None,
+							adjacency_set=None,
+							mask_data=None,
 							stratification_arr=stratification_blocks,
 							seed=seeds[i],
 							perform_tfce=False) for i in tqdm(range(int(n_permutations/seeds_divisor))))
