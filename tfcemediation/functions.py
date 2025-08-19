@@ -2224,6 +2224,221 @@ class LinearRegressionModelMRI:
 		elif mode == 'nested':
 			self.nested_model_z_tfce_max_permutations_ = np.array(tfce_maximum_values)
 
+	def permute_raw(self, mode, n_permutations, contrast_index=None, whiten=True, use_chunks=True, 
+								chunk_size=768, stratification_blocks=None):
+		"""
+		Performs raw permutation testing for different statistical approaches without TFCE correction.
+		
+		This function computes permutations and obtains the maximum raw statistic values 
+		across permutations for t-statistics, mediation z-scores, or nested model comparisons.
+
+		Parameters
+		----------
+		mode : str
+			The type of permutation to run: {'t', 'mediation', 'nested'}
+		n_permutations : int
+			The number of permutations to perform.
+		contrast_index : int, optional
+			The index of the contrast for permutation testing (required for 't' mode).
+		whiten : bool, optional
+			Whether to whiten the residuals before permutation (default is True).
+			Only applies to 't' and 'nested' modes.
+		use_chunks : bool, default True
+			Whether to use chunks for the permutation analysis. At the end of each chunk parallel 
+			processing stops and restarts until the desired n_permutations is achieved. This is 
+			helpful for any memory leaks. There should be anymore memory leaks now. The default 
+			chunk_size is quite large at 768, so there's probably minimal impact on performance. 
+			That is, it is safer to use chunking.
+		chunk_size : int, default = 768
+			The number of permutations per chunk. The default size is set as dividable by many 
+			different number of cores such as 8, 6, 12, and 16.
+			The number of permuations (total) will automatically adjust (increase in size) 
+			so n_permutations % chunk_size = 0.
+			For example, 2000 permutations ==> 2304 (3 chunks) or 10000 permutaions ==> 10752 (14 chunks).
+		stratification_blocks : None or np.array (ndim =1), default None
+			Shuffling within unique value of stratification block. 
+			while still allowing for a valid assessment of the null hypothesis. This is particularly 
+			useful when controlling for confounding variables or when dealing with clustered or 
+			hierarchical data.
+		"""
+		assert hasattr(self, 'adjacency_set_'), "Run calculate_tfce first (required for adjacency structure)"
+		
+		# Mode-specific preparations
+		if mode == 't':
+			assert contrast_index is not None, "contrast_index is required for t mode"
+			if self.memory_mapping_:
+				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
+				y = jload(self.memmap_y_name_, mmap_mode='r')
+			else:
+				y = self.y_
+			if whiten:
+				y = y - self.predict(self.X_)
+			X = self.X_
+		elif mode == 'mediation':
+			assert hasattr(self, 'mediation_z_tfce_positive_'), "Run calculate_mediation_z_tfce first"
+		elif mode == 'nested':
+			assert hasattr(self, 'adjacency_set_'), "Run calculate_nested_model_z_tfce first"
+			if self.memory_mapping_:
+				assert hasattr(self, 'memmap_y_name_'), "No memory mapped endogenous variables found"
+				y = jload(self.memmap_y_name_, mmap_mode='r')
+			else:
+				y = self.y_
+			if whiten:
+				y = y - self.predict(self.X_)
+			X = self.X_
+			Xreduced = self.nested_model_Xreduced_
+		else:
+			raise ValueError(f"Unknown mode: {mode}. Use 't', 'mediation', or 'nested'")
+
+		if stratification_blocks is not None:
+			stratification_blocks = np.array(stratification_blocks)
+			assert stratification_blocks.ndim == 1, "Error: stratification_blocks.ndim must equal 1"
+
+		# Determine number of seeds based on mode
+		seeds_divisor = 2 if mode in ['t', 'mediation'] else 1
+		
+		if use_chunks:
+			raw_maximum_values = []
+			if n_permutations % chunk_size != 0:
+				n_permutations += chunk_size - (n_permutations % chunk_size)
+			print("Running %d raw permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+			n_chunks = int(n_permutations/chunk_size)
+			for b in range(n_chunks):
+				print("chunk[%d/%d]: %d Permutations" % (int(b+1), n_chunks, chunk_size))
+				seeds = generate_seeds(n_seeds=int(chunk_size/seeds_divisor))
+				
+				if mode == 't':
+					chunk_raw_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_tfce_t_permutation)(
+							i=i, 
+							X=X,
+							y=y, 
+							contrast_index=contrast_index,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i],
+							perform_tfce=False) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+				elif mode == 'mediation':
+					chunk_raw_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_tfce_mediation_z_permutation)(
+							i=i, 
+							exogA=self.mediation_exogA_,
+							endogA=self.mediation_endogA_,
+							exogB=self.mediation_exogB_,
+							endogB=self.mediation_endogB_,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i],
+							perform_tfce=False) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+				elif mode == 'nested':
+					if self.use_log_likelihood_z_: # temporary until the functions are combined
+						chunk_raw_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+							delayed(self._run_nested_z_tfce_permutation_likelihood)(
+								i=i,
+								X=X,
+								Xreduced=Xreduced,
+								y=y,
+								H=self.tfce_H_,
+								E=self.tfce_E_,
+								adjacency_set=self.adjacency_set_,
+								mask_data=self.mask_data_,
+								stratification_arr=stratification_blocks,
+								seed=seeds[i],
+								perform_tfce=False) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+					else:
+						chunk_raw_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+							delayed(self._run_nested_z_tfce_permutation)(
+								i=i,
+								X=X,
+								Xreduced=Xreduced,
+								y=y,
+								H=self.tfce_H_,
+								E=self.tfce_E_,
+								adjacency_set=self.adjacency_set_,
+								mask_data=self.mask_data_,
+								stratification_arr=stratification_blocks,
+								seed=seeds[i],
+								perform_tfce=False) for i in tqdm(range(int(chunk_size/seeds_divisor))))
+					
+				raw_maximum_values.append(chunk_raw_maximum_values)
+			raw_maximum_values = np.array(raw_maximum_values).ravel()
+		else:
+			seeds = generate_seeds(n_seeds=int(n_permutations/seeds_divisor))
+			print("Running %d raw permutations [p<0.0500 +/- %1.4f]" % (n_permutations,(2*np.sqrt(0.05*(1-0.05)/n_permutations))))
+			if mode == 't':
+				raw_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+					delayed(self._run_tfce_t_permutation)(
+						i=i, 
+						X=X,
+						y=y, 
+						contrast_index=contrast_index,
+						H=self.tfce_H_,
+						E=self.tfce_E_,
+						adjacency_set=self.adjacency_set_,
+						mask_data=self.mask_data_,
+						stratification_arr=stratification_blocks,
+						seed=seeds[i],
+						perform_tfce=False) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+			elif mode == 'mediation':
+				raw_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+					delayed(self._run_tfce_mediation_z_permutation)(
+						i=i, 
+						exogA=self.mediation_exogA_,
+						endogA=self.mediation_endogA_,
+						exogB=self.mediation_exogB_,
+						endogB=self.mediation_endogB_,
+						H=self.tfce_H_,
+						E=self.tfce_E_,
+						adjacency_set=self.adjacency_set_,
+						mask_data=self.mask_data_,
+						stratification_arr=stratification_blocks,
+						seed=seeds[i],
+						perform_tfce=False) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+			elif mode == 'nested':
+				if self.use_log_likelihood_z_: # temporary until the functions are combined
+					raw_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_nested_z_tfce_permutation_likelihood)(
+							i=i,
+							X=X,
+							Xreduced=Xreduced,
+							y=y,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i],
+							perform_tfce=False) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+				else:
+					raw_maximum_values = Parallel(n_jobs=self.n_jobs_, backend='multiprocessing')(
+						delayed(self._run_nested_z_tfce_permutation)(
+							i=i,
+							X=X,
+							Xreduced=Xreduced,
+							y=y,
+							H=self.tfce_H_,
+							E=self.tfce_E_,
+							adjacency_set=self.adjacency_set_,
+							mask_data=self.mask_data_,
+							stratification_arr=stratification_blocks,
+							seed=seeds[i],
+							perform_tfce=False) for i in tqdm(range(int(n_permutations/seeds_divisor))))
+			raw_maximum_values = np.array(raw_maximum_values).ravel()
+		
+		# Store results with appropriate attribute names
+		if mode == 't':
+			self.t_raw_max_permutations_ = np.array(raw_maximum_values)
+		elif mode == 'mediation':
+			self.mediation_z_raw_max_permutations_ = np.array(raw_maximum_values)
+		elif mode == 'nested':
+			self.nested_model_z_raw_max_permutations_ = np.array(raw_maximum_values)
+
 	def _calculate_surface_tfce(self, mask_data, statistic, adjacency_set, H = 2.0, E = 0.67, return_max_tfce = False, only_positive_contrast = False):
 		"""
 		Computes the TFCE (Threshold-Free Cluster Enhancement) statistic for surface-based data.
@@ -2308,12 +2523,12 @@ class LinearRegressionModelMRI:
 			gc.collect()
 			return(out_statistic_positive, out_statistic_negative)
 
-	# inner permutation functions 
-	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, mask_data, stratification_arr, seed):
+	# inner permutation functions
+	def _run_tfce_t_permutation(self, i, X, y, contrast_index, H, E, adjacency_set, mask_data, stratification_arr, seed, perform_tfce=True):
 		"""
 		Runs a single TFCE-based permutation test.
 		
-		This function shuffles the data, computes t-statistics, and applies the TFCE algorithm.
+		This function shuffles the data, computes t-statistics, and optionally applies the TFCE algorithm.
 		
 		Parameters
 		----------
@@ -2333,11 +2548,13 @@ class LinearRegressionModelMRI:
 			A set defining adjacency relationships between data points.
 		seed : int or None
 			The random seed for permutation.
+		perform_tfce : bool, default=True
+			Whether to apply TFCE correction. If False, returns max raw statistic values.
 		
 		Returns
 		-------
 		tuple
-			The maximum TFCE values for positive and negative contrasts.
+			The maximum TFCE values (if perform_tfce=True) or raw statistic values (if perform_tfce=False) for positive and negative contrasts.
 		"""
 		if seed is None:
 			np.random.seed(np.random.randint(4294967295))
@@ -2365,24 +2582,29 @@ class LinearRegressionModelMRI:
 		tmp_t = None
 		del a, tmp_X, tmp_invXX, tmp_sigma2, tmp_se, tmp_t # this is probably redundant, but won't hurt...
 		
-		if len(adjacency_set) == 2:
-			tfce_values =  self._calculate_surface_tfce(mask_data = mask_data,
+		if not perform_tfce:
+			# Return max raw statistic values
+			max_pos = stat.max()
+			max_neg = (-stat).max()
+		else:
+			if len(adjacency_set) == 2:
+				tfce_values =  self._calculate_surface_tfce(mask_data = mask_data,
 																		statistic = stat,
 																		adjacency_set = adjacency_set,
 																		H = H, E = E, return_max_tfce = True)
-			max_pos, max_neg = tfce_values
-		else:
-			# Compute TFCE
-			perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-			perm_calcTFCE.run(stat, stat_TFCE)
-			max_pos = stat_TFCE.max()
-			# Compute TFCE for negative statistics
-			stat_TFCE.fill(0)
-			perm_calcTFCE.run(-stat, stat_TFCE)
-			max_neg = stat_TFCE.max()
-			perm_calcTFCE = None
-			stat_TFCE = None
+				max_pos, max_neg = tfce_values
+			else:
+				# Compute TFCE
+				perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+				stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+				perm_calcTFCE.run(stat, stat_TFCE)
+				max_pos = stat_TFCE.max()
+				# Compute TFCE for negative statistics
+				stat_TFCE.fill(0)
+				perm_calcTFCE.run(-stat, stat_TFCE)
+				max_neg = stat_TFCE.max()
+				perm_calcTFCE = None
+				stat_TFCE = None
 		X = None
 		y = None
 		stat = None
@@ -2392,13 +2614,13 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(max_pos, max_neg)
 
-	def _run_tfce_mediation_z_permutation(self, i, exogA, endogA, exogB, endogB, H, E, adjacency_set, mask_data, stratification_arr, seed):
+	def _run_tfce_mediation_z_permutation(self, i, exogA, endogA, exogB, endogB, H, E, adjacency_set, mask_data, stratification_arr, seed, perform_tfce=True):
 		"""
 		Perform a single TFCE-based permutation test for mediation analysis.
 
-		This method shuffles the data, calculates Sobel z-scores, and applies the TFCE algorithm 
+		This method shuffles the data, calculates Sobel z-scores, and optionally applies the TFCE algorithm 
 		to assess the statistical significance of the mediation effect under permutation. 
-		Returns the maximum positive and negative TFCE values from the permuted data.
+		Returns the maximum positive and negative TFCE or raw statistic values from the permuted data.
 
 		Parameters
 		----------
@@ -2425,6 +2647,8 @@ class LinearRegressionModelMRI:
 			unconstrained permutations.
 		seed : int or None
 			Random seed for reproducibility. If None, uses random initialization.
+		perform_tfce : bool, default=True
+			Whether to apply TFCE correction. If False, returns max raw statistic values.
 
 		Returns
 		-------
@@ -2443,81 +2667,88 @@ class LinearRegressionModelMRI:
 			perm_idx = np.random.permutation(np.arange(exogA.shape[0]))
 		tmp_z = self._calculate_sobel(exogA[perm_idx], endogA, exogB[perm_idx], endogB)
 
-		# Compute TFCE
-		if len(adjacency_set) == 2:
-			tfce_values = self._calculate_surface_tfce(mask_data = mask_data,
-																statistic = tmp_z.astype(np.float32, order = "C"),
-																adjacency_set = adjacency_set,
-																H = H,
-																E = E,
-																return_max_tfce = True,
-																only_positive_contrast = False)
-			max_pos, max_neg = tfce_values
+		if not perform_tfce:
+			# Return max raw statistic values
+			max_pos = tmp_z.max()
+			max_neg = (-tmp_z).max()
 		else:
-			perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
-			stat = tmp_z.astype(np.float32, order="C")
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order="C")
-			perm_calcTFCE.run(stat, stat_TFCE)
-			max_pos = stat_TFCE.max()
-			# Compute TFCE for negative statistics
-			stat_TFCE.fill(0)
-			perm_calcTFCE.run(-stat, stat_TFCE)
-			max_neg = stat_TFCE.max()
-			stat = None
-			stat_TFCE = None
-			perm_calcTFCE = None
-			# Memory cleanup
-			del stat, stat_TFCE, perm_calcTFCE
+			# Compute TFCE
+			if len(adjacency_set) == 2:
+				tfce_values = self._calculate_surface_tfce(mask_data = mask_data,
+																	statistic = tmp_z.astype(np.float32, order = "C"),
+																	adjacency_set = adjacency_set,
+																	H = H,
+																	E = E,
+																	return_max_tfce = True,
+																	only_positive_contrast = False)
+				max_pos, max_neg = tfce_values
+			else:
+				perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+				stat = tmp_z.astype(np.float32, order="C")
+				stat_TFCE = np.zeros_like(stat).astype(np.float32, order="C")
+				perm_calcTFCE.run(stat, stat_TFCE)
+				max_pos = stat_TFCE.max()
+				# Compute TFCE for negative statistics
+				stat_TFCE.fill(0)
+				perm_calcTFCE.run(-stat, stat_TFCE)
+				max_neg = stat_TFCE.max()
+				stat = None
+				stat_TFCE = None
+				perm_calcTFCE = None
+				# Memory cleanup
+				del stat, stat_TFCE, perm_calcTFCE
 		mask_data = None
 		tmp_z = None
 		del tmp_z, mask_data
 		gc.collect()
 		return(max_pos, max_neg)
 
-	def _run_nested_z_tfce_permutation_likelihood(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed):
+	def _run_nested_z_tfce_permutation_likelihood(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed, perform_tfce=True):
 		"""
 		Runs a single TFCE-based permutation test on estimated z statistic from a log likelihood test from nested_model.
 		
-		This function shuffles the data, computes z-statistic, and applies the TFCE algorithm.
+		This function shuffles the data, computes z-statistic, and optionally applies the TFCE algorithm.
 		
 		Parameters
 		----------
 		i : int
-		    The permutation index.
+			The permutation index.
 		X : numpy.ndarray
-		    The design matrix for the regression model.
+			The design matrix for the regression model.
 		Xreduced : numpy.ndarray
-		    The reduced design matrix for the regression model.
+			The reduced design matrix for the regression model.
 		y : numpy.ndarray
-		    The response variable.
+			The response variable.
 		H : float
-		    The height exponent for TFCE computation.
+			The height exponent for TFCE computation.
 		E : float
-		    The extent exponent for TFCE computation.
+			The extent exponent for TFCE computation.
 		adjacency_set : list
-		    A set defining adjacency relationships between data points.
+			A set defining adjacency relationships between data points.
 		stratification_arr : list
-		    A list defining stratification blocks for permutation testing
+			A list defining stratification blocks for permutation testing
 		seed : int or None
-		    The random seed for permutation.
+			The random seed for permutation.
+		perform_tfce : bool, default=True
+			Whether to apply TFCE correction. If False, returns max raw statistic values.
 		
 		Returns
 		-------
-		tuple
-		    The maximum TFCE values.
+		float
+			The maximum TFCE value (if perform_tfce=True) or raw statistic value (if perform_tfce=False).
 		"""
 		if seed is None:
-		    np.random.seed(np.random.randint(4294967295))
+			np.random.seed(np.random.randint(4294967295))
 		else:
-		    np.random.seed(seed)
+			np.random.seed(seed)
 
 		assert X.shape[1] > Xreduced.shape[1], "Xreduced must have a lower rank that the full model X"
 		assert X.shape[0] == Xreduced.shape[0], "Xreduced must have the same number of subjects as the full model X"
 
 		if stratification_arr is not None:
-		    perm_idx = self._permute_stratified_blocks(stratification_arr, seed=seed)
+			perm_idx = self._permute_stratified_blocks(stratification_arr, seed=seed)
 		else:
-		    perm_idx = np.random.permutation(np.arange(X.shape[0]))
+			perm_idx = np.random.permutation(np.arange(X.shape[0]))
 		tmp_X = X[perm_idx]
 		tmp_Xreduced = Xreduced[perm_idx]
 
@@ -2556,19 +2787,23 @@ class LinearRegressionModelMRI:
 		tmp_chi2_ = None
 		del tmp_X, tmp_Xreduced, tmp_coef, tmp_coef_reduced, tmp_y_pred_full, tmp_y_pred_reduced, tmp_rss_full, tmp_rss_reduced, tmp_df1, tmp_num_observations, tmp_log_likelihood_, tmp_log_likelihood_reduced_, tmp_chi2_
 
-		if len(adjacency_set) == 2:
-		    max_pos = self._calculate_surface_tfce(mask_data=mask_data,
-		                                         statistic=stat,
-		                                         adjacency_set=adjacency_set,
-		                                         H=H, E=E, return_max_tfce=True,
-		                                         only_positive_contrast=True)
+		if not perform_tfce:
+			# Return max raw statistic value
+			max_pos = stat.max()
 		else:
-		    perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
-		    stat_TFCE = np.zeros_like(stat).astype(np.float32, order="C")
-		    perm_calcTFCE.run(stat, stat_TFCE)
-		    max_pos = stat_TFCE.max()
-		    perm_calcTFCE = None
-		    stat_TFCE = None
+			if len(adjacency_set) == 2:
+				max_pos = self._calculate_surface_tfce(mask_data=mask_data,
+													 statistic=stat,
+													 adjacency_set=adjacency_set,
+													 H=H, E=E, return_max_tfce=True,
+													 only_positive_contrast=True)
+			else:
+				perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+				stat_TFCE = np.zeros_like(stat).astype(np.float32, order="C")
+				perm_calcTFCE.run(stat, stat_TFCE)
+				max_pos = stat_TFCE.max()
+				perm_calcTFCE = None
+				stat_TFCE = None
 		X = None
 		Xreduced = None
 		y = None
@@ -2579,12 +2814,11 @@ class LinearRegressionModelMRI:
 		gc.collect()
 		return(max_pos)
 
-
-	def _run_nested_z_tfce_permutation(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed):
+	def _run_nested_z_tfce_permutation(self, i, X, Xreduced, y, H, E, adjacency_set, mask_data, stratification_arr, seed, perform_tfce=True):
 		"""
 		Runs a single TFCE-based permutation test on estimated z statistic from nested_model.
 		
-		This function shuffles the data, computes z-statistic, and applies the TFCE algorithm.
+		This function shuffles the data, computes z-statistic, and optionally applies the TFCE algorithm.
 		
 		Parameters
 		----------
@@ -2606,11 +2840,13 @@ class LinearRegressionModelMRI:
 			A list defining stratification blocks for permutation testing
 		seed : int or None
 			The random seed for permutation.
+		perform_tfce : bool, default=True
+			Whether to apply TFCE correction. If False, returns max raw statistic values.
 		
 		Returns
 		-------
-		tuple
-			The maximum TFCE values.
+		float
+			The maximum TFCE value (if perform_tfce=True) or raw statistic value (if perform_tfce=False).
 		"""
 		if seed is None:
 			np.random.seed(np.random.randint(4294967295))
@@ -2651,20 +2887,24 @@ class LinearRegressionModelMRI:
 		temp_f = None
 		del a, tmp_X, tmp_Xreduced, tmp_coef, tmp_coef_reduced, tmp_rss_full, tmp_rss_reduced, tmp_df1, tmp_df2, temp_f # this is probably redundant, but won't hurt...
 
-		if len(adjacency_set) == 2:
-			max_pos = self._calculate_surface_tfce(mask_data = mask_data,
+		if not perform_tfce:
+			# Return max raw statistic value
+			max_pos = stat.max()
+		else:
+			if len(adjacency_set) == 2:
+				max_pos = self._calculate_surface_tfce(mask_data = mask_data,
 																		statistic = stat,
 																		adjacency_set = adjacency_set,
 																		H = H, E = E, return_max_tfce = True,
 																		only_positive_contrast = True)
-		else:
-			# Compute TFCE
-			perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
-			stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
-			perm_calcTFCE.run(stat, stat_TFCE)
-			max_pos = stat_TFCE.max()
-			perm_calcTFCE = None
-			stat_TFCE = None
+			else:
+				# Compute TFCE
+				perm_calcTFCE = CreateAdjSet(H, E, adjacency_set)
+				stat_TFCE = np.zeros_like(stat).astype(np.float32, order = "C")
+				perm_calcTFCE.run(stat, stat_TFCE)
+				max_pos = stat_TFCE.max()
+				perm_calcTFCE = None
+				stat_TFCE = None
 		X = None
 		Xreduced = None
 		y = None
