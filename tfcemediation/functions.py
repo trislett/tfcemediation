@@ -1525,7 +1525,7 @@ class LinearRegressionModelMRI:
 			warnings.warn("nan values detected. They will be set to zero.", UserWarning)
 			self.t_[~np.isfinite(self.t_)] = 0
 		if calculate_probability:
-			self.t_pvalues_ = tdist.sf(np.abs(self.t_), self.df_total_) * 2
+			self.t_pvalues_ = tdist.sf(np.abs(self.t_), self.df_within_) * 2
 			if self.fdr_correction_:
 				self.t_qvalues_ = np.ones((self.t_.shape))
 			for c in range(self.t_pvalues_.shape[0]):
