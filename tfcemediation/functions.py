@@ -2282,7 +2282,7 @@ class LinearRegressionModelMRI:
 			else:
 				y = self.y_
 			if whiten:
-				y = y - self.predict(self.X_)
+				print("Whitening nested models breaks model assumptions. Skipping.")
 			X = self.X_
 			Xreduced = self.nested_model_Xreduced_
 		else:
