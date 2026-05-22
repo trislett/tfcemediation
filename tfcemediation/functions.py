@@ -1646,6 +1646,8 @@ class LinearRegressionModelMRI:
 			Formula specifying the reduced model design matrix. Must result in
 			fewer predictors than 'self.X_' and have the same number of
 			observations. Predictors must be a subset of the full model.
+			Using ['1'] or ['intercept''] or ['Intercept] for intercept only
+			model. 
 		calculate_effect_size : bool, optional
 			If True, computes partial eta squared and partial omega squared
 			effect sizes. Default is False.
@@ -1748,7 +1750,17 @@ class LinearRegressionModelMRI:
 		"""
 		assert hasattr(self, 'dataframe_'), "Pandas dataframe is missing (self.dataframe_) run load_pandas_dataframe or load_csv_dataframe first"
 		assert hasattr(self, 't_contrast_names_'), "Contrast names are missing. Try first running: X = self.dummy_code_from_formula(formula_like = exogenous_formula, save_columns_names = True) or self.fit_from_formula(exogenous_formula, y)"
-		Xreduced, columns_names = self.dummy_code_from_formula(reduced_formula, save_columns_names = False, scale_dummy_arr = True, return_columns_names = True)
+		
+		# Handle intercept-only reduced model
+		if reduced_formula.strip() in ["Intercept", "1", "intercept"]:
+			Xreduced = np.ones((self.X_.shape[0], 1))
+			columns_names = np.array(['intercept'])
+		else:
+			Xreduced, columns_names = model.dummy_code_from_formula(
+				reduced_formula,
+				save_columns_names=False,
+				scale_dummy_arr=True,
+				return_columns_names=True)
 		for col in columns_names:
 			assert col in self.t_contrast_names_, "Reduced %s must be in full formula {%s}" % (col, self.exogenous_variables_formula_)
 		if self.fit_intercept_:
